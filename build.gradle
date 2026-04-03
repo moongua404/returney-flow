@@ -1,0 +1,9 @@
+// 루트 프로젝트 — 서브모듈 공통 설정
+subprojects {
+    group = 'com.returney'
+    version = '0.1.0-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+}
