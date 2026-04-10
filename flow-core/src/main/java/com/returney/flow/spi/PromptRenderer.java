@@ -17,4 +17,18 @@ public interface PromptRenderer {
    * @return 렌더링된 프롬프트 텍스트
    */
   String render(String action, Map<String, String> variables);
+
+  /**
+   * 액션에 정의된 모델명을 반환한다. 없으면 null.
+   */
+  default String getModel(String action) {
+    return null;
+  }
+
+  /**
+   * 액션에 정의된 thinking budget을 반환한다.
+   */
+  default int getThinkingBudget(String action) {
+    return -1;
+  }
 }

@@ -7,6 +7,7 @@ import com.returney.flow.spi.DataStore;
 import com.returney.flow.spi.ExecutionListener;
 import com.returney.flow.spi.InputResolver;
 import com.returney.flow.spi.LlmExecutor;
+import com.returney.flow.spi.LlmRequest;
 import com.returney.flow.spi.PromptRenderer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -139,9 +140,10 @@ public class FlowExecutor {
         if (skipSet.contains(nodeId)) {
           System.out.println("[FlowExecutor] SKIPPED: " + nodeId);
           ctx.setStatus(nodeId, NodeStatus.SKIPPED);
-          // 다운스트림도 skip
           markDownstreamSkipped(flowDef, nodeId, targetNodeIds, skipSet);
-          batch.add(CompletableFuture.completedFuture(null));
+          CompletableFuture<Void> skippedFuture = CompletableFuture.completedFuture(null);
+          batch.add(skippedFuture);
+          completionFutures.put(nodeId, skippedFuture);
           continue;
         }
 
@@ -210,10 +212,15 @@ public class FlowExecutor {
 
       String output;
       if (node.type() == NodeType.LLM) {
-        String model = config.model() != null ? config.model() : "gemini-2.5-flash";
+        // 우선순위: config 오버라이드 > yaml model > 기본값
+        String model = config.model();
+        if (model == null) model = promptRenderer.getModel(node.action());
+        if (model == null) model = "gemini-2.5-flash";
+        int thinkingBudget = config.thinkingBudget();
+        if (thinkingBudget < 0) thinkingBudget = promptRenderer.getThinkingBudget(node.action());
         System.out.println("[FlowExecutor] " + nodeId + " calling LLM (model=" + model + ")");
         llmExecutor.setContext(node.action(), variables);
-        output = llmExecutor.execute(renderedPrompt, model, config.thinkingBudget());
+        output = llmExecutor.execute(LlmRequest.single(renderedPrompt, model, thinkingBudget));
         System.out.println("[FlowExecutor] " + nodeId + " LLM response: " + output.length() + " chars");
       } else {
         System.out.println("[FlowExecutor] " + nodeId + " TRANSFORM (no LLM call)");

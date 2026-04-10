@@ -33,6 +33,22 @@ public interface LlmExecutor {
   String execute(String renderedPrompt, String model, int thinkingBudget);
 
   /**
+   * 구조화된 요청을 LLM에 전송한다.
+   *
+   * <p>단일 프롬프트 요청은 기존 {@link #execute(String, String, int)}로 위임한다.
+   * 대화 모드(멀티턴 캐싱 등)는 구현체에서 오버라이드한다.
+   *
+   * @param request LLM 호출 명세
+   * @return LLM 응답 텍스트
+   */
+  default String execute(LlmRequest request) {
+    if (!request.isConversation()) {
+      return execute(request.singlePrompt(), request.model(), request.thinkingBudget());
+    }
+    throw new UnsupportedOperationException("Conversation mode not supported by this executor");
+  }
+
+  /**
    * 텍스트 프롬프트 + 바이너리 콘텐츠를 함께 LLM에 전송한다 (multimodal).
    *
    * @param textPrompt 텍스트 프롬프트
