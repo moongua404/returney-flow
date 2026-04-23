@@ -1,0 +1,32 @@
+name: test-pipeline
+version: 1
+
+nodes:
+  - id: step_a
+    action: step_a
+    type: llm
+    result:
+      type: String
+
+  - id: step_b
+    action: step_b
+    type: llm
+    result:
+      type: String
+
+  - id: step_c
+    action: step_c
+    type: transform
+    result:
+      type: String
+    inputs:
+      a: "step_a"
+      b: "step_b"
+
+  - id: step_d
+    action: step_d
+    type: llm
+    result:
+      type: String
+    inputs:
+      c: "step_c"

@@ -1,0 +1,14 @@
+plugins {
+    id 'groovy'
+}
+
+group = 'com.returney.flow'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation localGroovy()
+    implementation 'org.yaml:snakeyaml:2.3'
+}

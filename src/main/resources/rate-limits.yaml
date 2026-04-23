@@ -1,0 +1,19 @@
+models:
+  - prefix: gemini
+    rpm: 2000
+    tpm: 4000000
+  - prefix: claude
+    rpm: 50
+    tpm: 100000
+  - prefix: gpt
+    rpm: 500
+    tpm: 2000000
+  - prefix: o1
+    rpm: 500
+    tpm: 2000000
+  - prefix: o3
+    rpm: 500
+    tpm: 2000000
+  - prefix: o4
+    rpm: 500
+    tpm: 2000000

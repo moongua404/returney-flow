@@ -1,9 +1,38 @@
-// 루트 프로젝트 — 서브모듈 공통 설정
-subprojects {
-    group = 'com.returney'
-    version = '0.1.0-SNAPSHOT'
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
 
-    repositories {
-        mavenCentral()
+group = 'com.returney'
+version = '0.1.0-SNAPSHOT'
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
     }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api 'org.yaml:snakeyaml:2.3'
+    implementation 'com.google.code.gson:gson:2.11.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.assertj:assertj-core:3.27.3'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
 }
