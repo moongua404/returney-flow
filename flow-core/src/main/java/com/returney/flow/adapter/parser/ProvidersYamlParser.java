@@ -42,9 +42,11 @@ public final class ProvidersYamlParser {
     String defaultModel = parseDefaultModel(root);
     ParsedModels models = parseModels(root);
     Map<String, String> fallback = parseFallback(root);
+    ProvidersConfig.RetryPolicy retry = parseRetry(root);
 
     return new ProvidersConfig(
-        providers, routing, defaultModel, models.capabilities, models.rateLimits, fallback);
+        providers, routing, defaultModel,
+        models.capabilities, models.rateLimits, fallback, retry);
   }
 
   // ── section parsers ──
@@ -139,6 +141,24 @@ public final class ProvidersYamlParser {
       if (entry.getValue() instanceof String fb) result.put(entry.getKey(), fb);
     }
     return result;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ProvidersConfig.RetryPolicy parseRetry(Map<String, Object> root) {
+    Object raw = root.get("retry");
+    if (!(raw instanceof Map)) return ProvidersConfig.RetryPolicy.DEFAULT;
+    Map<String, Object> r = (Map<String, Object>) raw;
+    ProvidersConfig.RetryPolicy d = ProvidersConfig.RetryPolicy.DEFAULT;
+    int maxAttempts = r.get("maxAttempts") instanceof Number n ? n.intValue() : d.maxAttempts();
+    long initialDelay =
+        r.get("initialDelayMs") instanceof Number n ? n.longValue() : d.initialDelayMs();
+    long maxDelay =
+        r.get("maxDelayMs") instanceof Number n ? n.longValue() : d.maxDelayMs();
+    double mult =
+        r.get("backoffMultiplier") instanceof Number n ? n.doubleValue() : d.backoffMultiplier();
+    double jitter =
+        r.get("jitter") instanceof Number n ? n.doubleValue() : d.jitter();
+    return new ProvidersConfig.RetryPolicy(maxAttempts, initialDelay, maxDelay, mult, jitter);
   }
 
   /** parseModels의 두 결과를 한 번에 반환하기 위한 내부 record. */

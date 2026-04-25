@@ -9,8 +9,10 @@ import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.domain.execution.PipelineResult;
 import com.returney.flow.domain.llm.LlmCallEvent;
 import com.returney.flow.domain.llm.LlmCallException;
+import com.returney.flow.domain.llm.LlmClientErrorException;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
+import com.returney.flow.domain.llm.LlmTransientException;
 import com.returney.flow.port.ApiKeySupplier;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
@@ -200,15 +202,14 @@ class InternalLlmRouterTest {
   }
 
   @Test
-  void fallback_체인_따라_재시도() {
-    AtomicReference<String> primaryCalled = new AtomicReference<>();
+  void transient_오류는_같은_모델로_retry_소진_후_fallback() {
     AtomicReference<String> fallbackCalled = new AtomicReference<>();
+    java.util.concurrent.atomic.AtomicInteger primaryAttempts = new java.util.concurrent.atomic.AtomicInteger(0);
 
     LlmExecutor flaky = req -> {
-      // 1차(claude-sonnet-4-6)는 실패, 2차(claude-haiku-4-5) 성공
       if (req.model().equals("claude-sonnet-4-6")) {
-        primaryCalled.set(req.model());
-        throw new LlmCallException("primary down", null);
+        primaryAttempts.incrementAndGet();
+        throw new LlmTransientException("anthropic", 503, "overloaded");
       }
       fallbackCalled.set(req.model());
       return new LlmRawResponse("haiku-ok", 1, 1, 2, 0, 0);
@@ -218,9 +219,45 @@ class InternalLlmRouterTest {
 
     LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
 
-    assertThat(primaryCalled.get()).isEqualTo("claude-sonnet-4-6");
+    // primary는 maxAttempts(3) 만큼 시도, 모두 실패 후 fallback
+    assertThat(primaryAttempts.get()).isEqualTo(CONFIG.retryPolicy().maxAttempts());
     assertThat(fallbackCalled.get()).isEqualTo("claude-haiku-4-5");
     assertThat(result.text()).isEqualTo("haiku-ok");
+  }
+
+  @Test
+  void permanent_오류는_retry도_fallback도_안_함() {
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor failing = req -> {
+      calls.incrementAndGet();
+      throw new LlmClientErrorException("anthropic", 401, "invalid api key");
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", failing));
+
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0)))
+        .isInstanceOf(LlmClientErrorException.class)
+        .hasMessageContaining("401");
+
+    // 단 1회만 호출 — retry/fallback 모두 미발동
+    assertThat(calls.get()).isEqualTo(1);
+  }
+
+  @Test
+  void transient_retry로_복구되면_fallback_안_가() {
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor flaky = req -> {
+      int n = calls.incrementAndGet();
+      if (n < 3) throw new LlmTransientException("anthropic", 429, "rate limited");
+      return new LlmRawResponse("recovered", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", flaky));
+
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    assertThat(result.text()).isEqualTo("recovered");
+    assertThat(calls.get()).isEqualTo(3);   // 3차 시도에서 성공
   }
 
   @Test
@@ -248,10 +285,70 @@ class InternalLlmRouterTest {
   }
 
   @Test
-  void fallback_시도도_attemptIndex_이벤트로_식별() {
+  void maxAttempts_1이면_재시도_없이_즉시_throw_또는_fallback() {
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor failing = req -> {
+      calls.incrementAndGet();
+      throw new LlmTransientException("anthropic", 503, "down");
+    };
+
+    // maxAttempts=1, fallback 없는 config
+    ProvidersConfig configNoRetryNoFb = ProvidersYamlParser.parse(
+        """
+        providers:
+          anthropic:
+            type: anthropic
+            baseUrl: https://example.com
+        routing:
+          - prefix: "claude-"
+            provider: anthropic
+        default: claude-haiku-4-5
+        retry:
+          maxAttempts: 1
+          initialDelayMs: 0
+          maxDelayMs: 0
+          backoffMultiplier: 1.0
+          jitter: 0.0
+        """);
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(configNoRetryNoFb, Map.of("anthropic", failing));
+
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0)))
+        .isInstanceOf(LlmTransientException.class);
+
+    assertThat(calls.get()).isEqualTo(1);   // 단 1회
+  }
+
+  @Test
+  void backoff은_재시도_사이에만_호출됨() {
+    java.util.List<Long> sleepDurations = new java.util.ArrayList<>();
+    InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
+
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor flaky = req -> {
+      int n = calls.incrementAndGet();
+      if (n < 3) throw new LlmTransientException("anthropic", 429, "rate");
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(
+        CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
+
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    // 3회 시도, 사이에 2회 sleep
+    assertThat(calls.get()).isEqualTo(3);
+    assertThat(sleepDurations).hasSize(2);
+    // exp backoff: initial=500ms, mult=2.0 → 500ms, 1000ms (jitter ±20%)
+    assertThat(sleepDurations.get(0)).isBetween(400L, 600L);
+    assertThat(sleepDurations.get(1)).isBetween(800L, 1200L);
+  }
+
+  @Test
+  void retry와_fallback이_각각_attemptIndex로_식별됨() {
     LlmExecutor flaky = req -> {
       if (req.model().equals("claude-sonnet-4-6")) {
-        throw new LlmCallException("down", null);
+        throw new LlmTransientException("anthropic", 503, "down");
       }
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
@@ -271,13 +368,19 @@ class InternalLlmRouterTest {
     router.setLifecycle(listener);
     router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
 
-    assertThat(events).hasSize(2);
-    assertThat(events.get(0).attemptIndex()).isEqualTo(0);
-    assertThat(events.get(0).success()).isFalse();
-    assertThat(events.get(0).resolvedModel()).isEqualTo("claude-sonnet-4-6");
-    assertThat(events.get(1).attemptIndex()).isEqualTo(1);
-    assertThat(events.get(1).success()).isTrue();
-    assertThat(events.get(1).resolvedModel()).isEqualTo("claude-haiku-4-5");
+    int max = CONFIG.retryPolicy().maxAttempts();
+    // primary가 max회 실패 + fallback 1회 성공 = max+1 events
+    assertThat(events).hasSize(max + 1);
+    // 0..max-1: primary attemptIndex 0..max-1, 모두 실패
+    for (int i = 0; i < max; i++) {
+      assertThat(events.get(i).attemptIndex()).isEqualTo(i);
+      assertThat(events.get(i).success()).isFalse();
+      assertThat(events.get(i).resolvedModel()).isEqualTo("claude-sonnet-4-6");
+    }
+    // max: fallback 첫 시도 (offset = maxAttempts)
+    assertThat(events.get(max).attemptIndex()).isEqualTo(max);
+    assertThat(events.get(max).success()).isTrue();
+    assertThat(events.get(max).resolvedModel()).isEqualTo("claude-haiku-4-5");
   }
 
   /** 지정된 프로바이더 이름들에 대해서만 가짜 키를 반환. */

@@ -81,8 +81,19 @@ models:
     rate: { rpm: 500, tpm: 800000 }
 
 # 모델 fallback 체인. exact key 우선, 없으면 prefix 매칭, 없으면 'default' 키 사용.
-# fallback이 또 실패하면 끝까지 따라가지 않고 거기서 멈춤 (1단 fallback).
+# fallback은 transient 오류로 같은 모델 retry가 모두 소진된 후에만 트리거된다.
 fallback:
   claude-sonnet-4-6: claude-haiku-4-5
   gpt-5-mini: gpt-4.1-mini
   default: gemini-2.5-flash-lite
+
+# Transient 오류 (LlmTransientException, LlmNetworkException) 재시도 정책.
+# permanent 오류 (LlmClientErrorException 등 4xx)는 재시도/fallback 모두 안 함.
+# 백오프: min(maxDelayMs, initialDelayMs * backoffMultiplier^i) * (1 ± jitter)
+# 미명시 시 RetryPolicy.DEFAULT 사용 (3, 500, 10000, 2.0, 0.2).
+retry:
+  maxAttempts: 3
+  initialDelayMs: 500
+  maxDelayMs: 10000
+  backoffMultiplier: 2.0
+  jitter: 0.2

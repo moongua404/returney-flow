@@ -200,7 +200,26 @@ models:                      # 모델별 attribute. 라우팅과 별개로 모�
 fallback:                    # 1단 fallback. exact → prefix → 'default'
   claude-sonnet-4-6: claude-haiku-4-5
   default: gemini-2.5-flash-lite
+
+retry:                       # transient 오류 재시도. 미명시 시 RetryPolicy.DEFAULT
+  maxAttempts: 3             # 모델당 총 시도 수 (1=재시도 없음)
+  initialDelayMs: 500
+  maxDelayMs: 10000
+  backoffMultiplier: 2.0
+  jitter: 0.2                # 0~1 비율
 ```
+
+### Retry / fallback 동작
+
+```
+attempt(primary, idx=0)
+├── LlmTransientException / LlmNetworkException → backoff 후 재시도 (총 maxAttempts회)
+├── LlmClientErrorException 등 permanent → 즉시 throw, fallback도 안 감
+└── 모든 재시도 소진 → fallback 모델로 같은 retry 사이클 (idx=maxAttempts부터)
+```
+
+각 attempt마다 `ExecutionListener.onLlmCall(event)` 발행 — `event.attemptIndex()`가
+0부터 maxAttempts-1까지면 primary, maxAttempts 이상이면 fallback.
 
 ---
 

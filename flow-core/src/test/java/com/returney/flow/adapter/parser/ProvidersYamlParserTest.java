@@ -64,6 +64,60 @@ class ProvidersYamlParserTest {
   }
 
   @Test
+  void retry_섹션_없으면_DEFAULT_적용() {
+    String yaml =
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        """;
+
+    ProvidersConfig config = ProvidersYamlParser.parse(yaml);
+    assertThat(config.retryPolicy()).isEqualTo(ProvidersConfig.RetryPolicy.DEFAULT);
+  }
+
+  @Test
+  void retry_섹션_파싱() {
+    ProvidersConfig config = ProvidersYamlParser.loadFromClasspath();
+
+    ProvidersConfig.RetryPolicy r = config.retryPolicy();
+    assertThat(r.maxAttempts()).isEqualTo(3);
+    assertThat(r.initialDelayMs()).isEqualTo(500L);
+    assertThat(r.maxDelayMs()).isEqualTo(10_000L);
+    assertThat(r.backoffMultiplier()).isEqualTo(2.0);
+    assertThat(r.jitter()).isEqualTo(0.2);
+  }
+
+  @Test
+  void retry_부분_명시는_나머지_DEFAULT_사용() {
+    String yaml =
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        retry:
+          maxAttempts: 5
+        """;
+
+    ProvidersConfig config = ProvidersYamlParser.parse(yaml);
+    ProvidersConfig.RetryPolicy r = config.retryPolicy();
+    assertThat(r.maxAttempts()).isEqualTo(5);
+    // 나머지는 DEFAULT
+    assertThat(r.initialDelayMs()).isEqualTo(ProvidersConfig.RetryPolicy.DEFAULT.initialDelayMs());
+    assertThat(r.backoffMultiplier()).isEqualTo(ProvidersConfig.RetryPolicy.DEFAULT.backoffMultiplier());
+  }
+
+  @Test
   void default_누락_시_파싱_실패() {
     String yaml =
         """

@@ -2,6 +2,7 @@ package com.returney.flow.application;
 
 import com.returney.flow.adapter.common.SlidingWindowRateLimiter;
 import com.returney.flow.adapter.parser.ProvidersConfig;
+import com.returney.flow.adapter.parser.ProvidersConfig.RetryPolicy;
 import com.returney.flow.adapter.parser.ProvidersYamlParser;
 import com.returney.flow.adapter.provider.anthropic.ClaudeLlmExecutor;
 import com.returney.flow.adapter.provider.gemini.GeminiConfig;
@@ -10,8 +11,10 @@ import com.returney.flow.adapter.provider.openai.GptLlmExecutor;
 import com.returney.flow.adapter.provider.openai.ReasoningLlmExecutor;
 import com.returney.flow.domain.llm.LlmCallEvent;
 import com.returney.flow.domain.llm.LlmCallException;
+import com.returney.flow.domain.llm.LlmNetworkException;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
+import com.returney.flow.domain.llm.LlmTransientException;
 import com.returney.flow.port.ApiKeySupplier;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
@@ -19,6 +22,7 @@ import com.returney.flow.port.RateLimiter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * 모델명을 기반으로 LLM 프로바이더를 라우팅하는 라우터.
@@ -37,9 +41,20 @@ import java.util.UUID;
  */
 public final class InternalLlmRouter implements LlmExecutor {
 
+  /** 테스트 가능성을 위한 sleep 추상. 디폴트는 {@link Thread#sleep}. */
+  @FunctionalInterface
+  interface Sleeper {
+    void sleep(long ms) throws InterruptedException;
+
+    static Sleeper real() {
+      return Thread::sleep;
+    }
+  }
+
   private final ProvidersConfig config;
   private final Map<String, LlmExecutor> executors;
   private final RateLimiter rateLimiter;
+  private final Sleeper sleeper;
 
   // 컨텍스트는 호출 스레드별로 보관. virtual thread fan-out에선 호출 직전 setX가 매번 일어남.
   private final ThreadLocal<UUID> currentSessionId = new ThreadLocal<>();
@@ -48,21 +63,34 @@ public final class InternalLlmRouter implements LlmExecutor {
       ThreadLocal.withInitial(ExecutionListener::noop);
 
   private InternalLlmRouter(
-      ProvidersConfig config, Map<String, LlmExecutor> executors, RateLimiter rateLimiter) {
+      ProvidersConfig config,
+      Map<String, LlmExecutor> executors,
+      RateLimiter rateLimiter,
+      Sleeper sleeper) {
     this.config = config;
     this.executors = executors;
     this.rateLimiter = rateLimiter;
+    this.sleeper = sleeper;
   }
 
-  /** 테스트 전용 — 명시적 executor 맵 + 한도 없는 limiter. */
+  /** 테스트 전용 — 명시적 executor 맵 + 한도 없는 limiter + 즉시 반환 sleeper. */
   static InternalLlmRouter forTesting(ProvidersConfig config, Map<String, LlmExecutor> executors) {
-    return new InternalLlmRouter(config, new HashMap<>(executors), RateLimiter.unlimited());
+    return new InternalLlmRouter(config, new HashMap<>(executors), RateLimiter.unlimited(), ms -> {});
   }
 
-  /** 테스트 전용 — 명시적 executor 맵 + 명시적 limiter. */
+  /** 테스트 전용 — 명시적 executor 맵 + 명시적 limiter + 즉시 반환 sleeper. */
   static InternalLlmRouter forTesting(
       ProvidersConfig config, Map<String, LlmExecutor> executors, RateLimiter rateLimiter) {
-    return new InternalLlmRouter(config, new HashMap<>(executors), rateLimiter);
+    return new InternalLlmRouter(config, new HashMap<>(executors), rateLimiter, ms -> {});
+  }
+
+  /** 테스트 전용 — sleeper 주입까지 명시. backoff 호출 횟수/지연을 검증할 때 사용. */
+  static InternalLlmRouter forTesting(
+      ProvidersConfig config,
+      Map<String, LlmExecutor> executors,
+      RateLimiter rateLimiter,
+      Sleeper sleeper) {
+    return new InternalLlmRouter(config, new HashMap<>(executors), rateLimiter, sleeper);
   }
 
   /** 클래스패스 {@code providers.yaml} + 환경변수 키로 라우터 생성. */
@@ -92,7 +120,7 @@ public final class InternalLlmRouter implements LlmExecutor {
       LlmExecutor exec = buildExecutor(p, key);
       if (exec != null) executors.put(providerName, exec);
     }
-    return new InternalLlmRouter(config, executors, rateLimiter);
+    return new InternalLlmRouter(config, executors, rateLimiter, Sleeper.real());
   }
 
   private static LlmExecutor buildExecutor(ProvidersConfig.ProviderEntry p, String apiKey) {
@@ -127,26 +155,53 @@ public final class InternalLlmRouter implements LlmExecutor {
       model = config.defaultModel();
     }
 
-    String sessionId = currentSessionId.get() != null ? currentSessionId.get().toString() : null;
-    String action = currentAction.get();
-    ExecutionListener listener = currentListener.get();
+    Ctx ctx = new Ctx(
+        currentSessionId.get() != null ? currentSessionId.get().toString() : null,
+        currentAction.get(),
+        currentListener.get());
 
     LlmRequest first = applyCapability(ensureModel(request, model), model);
     try {
-      return attempt(first, model, sessionId, action, listener, 0);
-    } catch (RuntimeException primaryError) {
+      return attemptWithRetries(first, model, ctx, 0);
+    } catch (LlmCallException primaryError) {
       String fallbackModel = config.fallbackFor(model);
-      if (fallbackModel == null || !isFallbackEligible(primaryError)) {
+      if (fallbackModel == null || !isTransient(primaryError)) {
         throw primaryError;
       }
       LlmRequest fbRequest = applyCapability(ensureModel(request, fallbackModel), fallbackModel);
-      return attempt(fbRequest, fallbackModel, sessionId, action, listener, 1);
+      // primary가 N회 시도 후 fallback 시작 — attemptIndex offset 적용
+      return attemptWithRetries(fbRequest, fallbackModel, ctx, config.retryPolicy().maxAttempts());
     }
   }
 
+  /**
+   * 같은 모델로 retryPolicy.maxAttempts() 회까지 재시도.
+   *
+   * <p>{@link LlmTransientException} / {@link LlmNetworkException}만 재시도 대상.
+   * permanent 오류 (LlmClientErrorException 등)는 즉시 propagate.
+   *
+   * @param baseAttemptIndex onLlmCall 이벤트의 attemptIndex 시작값
+   */
+  private LlmRawResponse attemptWithRetries(
+      LlmRequest request, String model, Ctx ctx, int baseAttemptIndex) throws LlmCallException {
+    RetryPolicy policy = config.retryPolicy();
+    LlmCallException lastTransient = null;
+    for (int i = 0; i < policy.maxAttempts(); i++) {
+      try {
+        return attempt(request, model, ctx, baseAttemptIndex + i);
+      } catch (LlmCallException e) {
+        if (!isTransient(e)) throw e;             // permanent → propagate
+        lastTransient = e;
+        if (i + 1 < policy.maxAttempts()) {
+          sleepBackoff(policy, i);
+        }
+      }
+    }
+    throw lastTransient;                            // 모든 시도 소진
+  }
+
   private LlmRawResponse attempt(
-      LlmRequest request, String model, String sessionId, String action,
-      ExecutionListener listener, int attemptIndex) throws LlmCallException {
+      LlmRequest request, String model, Ctx ctx, int attemptIndex) throws LlmCallException {
     String providerName = config.resolveProvider(model);
     if (providerName == null) {
       throw new LlmCallException(
@@ -173,15 +228,15 @@ public final class InternalLlmRouter implements LlmExecutor {
       LlmRawResponse response = exec.execute(request);
       long latency = System.currentTimeMillis() - start;
       reservation.confirm(response.totalTokens());
-      safelyEmit(listener,
-          LlmCallEvent.success(sessionId, action, request, response, model, latency, attemptIndex));
+      safelyEmit(ctx.listener,
+          LlmCallEvent.success(ctx.sessionId, ctx.action, request, response, model, latency, attemptIndex));
       return response;
     } catch (RuntimeException e) {
       long latency = System.currentTimeMillis() - start;
-      // 실패 시에도 reservation 해소 (estimate 그대로 카운트되도록 0이 아닌 estimated로 confirm).
+      // 실패 시에도 reservation 해소 (estimate 그대로 카운트되도록).
       reservation.confirm(estimated);
-      safelyEmit(listener,
-          LlmCallEvent.failure(sessionId, action, request, model, latency, e, attemptIndex));
+      safelyEmit(ctx.listener,
+          LlmCallEvent.failure(ctx.sessionId, ctx.action, request, model, latency, e, attemptIndex));
       throw e;
     }
   }
@@ -201,13 +256,33 @@ public final class InternalLlmRouter implements LlmExecutor {
   }
 
   /**
-   * fallback 트리거 여부. 4xx/auth 같은 항구적 오류는 굳이 fallback 안 함.
-   * 보수적으로: LlmCallException 자체의 cause나 메시지로 transient 판단. 지금은 단순화 —
-   * 모든 RuntimeException이 fallback 대상. 백엔드 sweep에서 정교화.
+   * Transient(재시도 가능) 오류 분류.
+   *
+   * <p>{@link LlmTransientException} (429/500/503) 또는 {@link LlmNetworkException} (IO/timeout)만
+   * 재시도/fallback 대상. 4xx auth/bad request 같은 항구적 오류는 false → 즉시 throw.
    */
-  private static boolean isFallbackEligible(Throwable error) {
-    return true;
+  private static boolean isTransient(Throwable e) {
+    return e instanceof LlmTransientException || e instanceof LlmNetworkException;
   }
+
+  /** retryIdx (0=첫 재시도)마다 exponential backoff + jitter로 sleep. */
+  private void sleepBackoff(RetryPolicy policy, int retryIdx) throws LlmCallException {
+    double base = policy.initialDelayMs() * Math.pow(policy.backoffMultiplier(), retryIdx);
+    long delay = Math.min((long) base, policy.maxDelayMs());
+    if (policy.jitter() > 0.0) {
+      double factor = 1.0 + (ThreadLocalRandom.current().nextDouble() * 2 - 1) * policy.jitter();
+      delay = Math.max(0L, (long) (delay * factor));
+    }
+    try {
+      sleeper.sleep(delay);
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      throw new LlmCallException("Retry backoff interrupted", ie);
+    }
+  }
+
+  /** ThreadLocal 컨텍스트를 호출당 1회 읽어 retry/fallback 동안 안정적으로 전달. */
+  private record Ctx(String sessionId, String action, ExecutionListener listener) {}
 
   /**
    * capability에 따라 thinkingBudget 보정. 미지원 모델은 0으로 강제, 지원 모델은
