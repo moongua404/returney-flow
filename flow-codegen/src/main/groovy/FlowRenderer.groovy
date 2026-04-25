@@ -198,9 +198,11 @@ package ${m.pkg};
 import com.google.gson.Gson;
 import com.returney.flow.adapter.parser.PipelineYamlParser;
 import com.returney.flow.adapter.prompt.ClasspathPromptRenderer;
+import com.returney.flow.application.InternalLlmRouter;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.execution.ExecutionConfig;
 import com.returney.flow.domain.execution.PipelineResult;
+import com.returney.flow.port.ApiKeySupplier;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.FlowCore;
 import com.returney.flow.port.LlmExecutor;
@@ -224,11 +226,10 @@ public abstract class ${m.flowName}Base {
     private static final PromptRenderer RENDERER =
         ClasspathPromptRenderer.forActions(${actionsArg});
 
-    private final LlmExecutor llmExecutor;
     private final Executor executor;
+    private volatile LlmExecutor cachedLlmExecutor;
 
-    protected ${m.flowName}Base(LlmExecutor llmExecutor, Executor executor) {
-        this.llmExecutor = llmExecutor;
+    protected ${m.flowName}Base(Executor executor) {
         this.executor = executor;
     }
 
@@ -248,7 +249,7 @@ public abstract class ${m.flowName}Base {
         ExecutionConfig config,
         ExecutionListener listener) {
 
-        LlmExecutor middleware = createLlmMiddleware(llmExecutor);
+        LlmExecutor middleware = createLlmMiddleware(llmExecutor());
         middleware.setSessionId(sessionId);
         ServerNodeExecutor serverNodes = buildServerNodeExecutor();
         ExecutionListener el = listener != null ? listener : ExecutionListener.noop();
@@ -269,6 +270,38 @@ public abstract class ${m.flowName}Base {
         // 크리티컬 필드가 null이면 실패로 판단
         ${m.resultNodes.findAll { it.critical }.collect { "if (result.${it.field}() == null) return true;" }.join('\n        ')}
         return false;
+    }
+
+    /**
+     * API 키 공급자. 기본은 환경변수({@code <NAME>_API_KEY}).
+     * Spring Vault 등을 쓰려면 재정의한다.
+     */
+    protected ApiKeySupplier apiKeySupplier() {
+        return ApiKeySupplier.fromEnv();
+    }
+
+    /**
+     * LLM 실행기 팩토리. 기본은 {@link InternalLlmRouter} (providers.yaml 기반 라우팅).
+     * 외부 게이트웨이 등을 쓰려면 재정의한다.
+     */
+    protected LlmExecutor createLlmExecutor() {
+        return InternalLlmRouter.from(
+            com.returney.flow.adapter.parser.ProvidersYamlParser.loadFromClasspath(),
+            apiKeySupplier());
+    }
+
+    private LlmExecutor llmExecutor() {
+        LlmExecutor local = cachedLlmExecutor;
+        if (local == null) {
+            synchronized (this) {
+                local = cachedLlmExecutor;
+                if (local == null) {
+                    local = createLlmExecutor();
+                    cachedLlmExecutor = local;
+                }
+            }
+        }
+        return local;
     }
 
     /** LLM 미들웨어 팩토리. 재정의하여 LLM 호출을 가로챌 수 있다. */
