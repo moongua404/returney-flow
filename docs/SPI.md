@@ -1,245 +1,190 @@
-# flow-core SPI 명세
+# flow-spi 명세 (목표 상태)
 
-YAML 선언형 DAG 기반 LLM 파이프라인 라이브러리. 파이프라인을 YAML로 선언하면 `PipelineExecutor`가 위상 정렬로 실행 순서를 결정하고 독립 노드를 Java Virtual Thread로 병렬 실행한다.
+YAML 선언형 DAG LLM 파이프라인. 소비자는 yaml + codegen + 추상 클래스 구현으로 끝낸다. flow-core 내부(파서, 라우팅, 프로바이더 호출, rate limiting, 프롬프트 렌더링)는 외부에 노출되지 않는다.
 
-라이브러리는 Spring·JPA·LLM SDK에 의존하지 않는다. 외부 동작은 6개 포트(SPI)로 추상화되어 있으며 구현은 호출자가 주입한다.
+> 이 문서는 리팩터링 **목표** 상태를 기술한다. 현 단계의 구현은 docs/SPI.md 이전 버전 또는 코드를 직접 참고하라.
 
 ---
 
-## 포트 (Port)
+## 모듈 구조
 
-| 포트 | 역할 | Backend 구현체 |
+```
+returney-flow/
+├── flow-spi/        # 외부 의존 0. JDK only.
+└── flow-core/       # flow-spi에 api 의존. snakeyaml/gson 등.
+```
+
+`flow-codegen`은 별도 standalone Gradle 프로젝트로 소비자의 `buildSrc`가 `includeBuild`로 가져간다.
+
+---
+
+## 소비자 워크플로우
+
+1. 파이프라인 yaml 작성 (`pipeline-flow.yaml`, `prompts/*.yaml`, `providers.yaml`)
+2. 빌드 시 codegen이 yaml 정합성을 검증하고 타입 안전한 베이스 클래스를 생성
+3. 소비자는 생성된 `*PipelineBase`를 상속해 server-node 메서드 본문만 구현
+4. 런타임: `pipeline.run(prerequisites, ...)` → core가 LLM 호출까지 전담
+
+---
+
+## flow-spi 노출 표면
+
+총 9개 타입. 소비자가 직접 다루는 핵심은 3개(`Pipeline`, `*PipelineBase`(생성됨), `PipelineLifecycle`).
+
+### 진입 인터페이스 (`com.returney.flow.api`)
+
+```java
+/** codegen이 만든 *PipelineBase가 구현. 소비자는 .run()만 호출. */
+public interface Pipeline<P, R> {
+    R run(P prerequisites, UUID sessionId, Set<String> nodeIds,
+          ExecutionConfig config, PipelineLifecycle lifecycle);
+}
+
+/** 런타임 설정. 모델 오버라이드 등. */
+public record ExecutionConfig(String modelOverride, ...) {
+    public static ExecutionConfig defaults() { ... }
+}
+
+/** 라이프사이클 콜백. 로깅/메트릭/DB 적재용. 모든 메서드 default no-op. */
+public interface PipelineLifecycle {
+    default void onNodeStarted(String nodeId) {}
+    default void onNodeCompleted(String nodeId, NodeResult result) {}
+    default void onNodeFailed(String nodeId, String error) {}
+    default void onLlmCall(String nodeId, LlmRequest req, LlmRawResponse resp) {}
+    default void onFlowCompleted(ExecutionResult result) {}
+
+    static PipelineLifecycle noop() { return new PipelineLifecycle() {}; }
+}
+
+/** 런타임 결과 (raw, untyped). codegen이 typed *Result로 변환. */
+public record ExecutionResult(
+    Map<String, NodeResult> nodeResults,
+    Set<String> failedNodes,
+    long durationMs) {}
+
+public record NodeResult(String nodeId, NodeStatus status, String output,
+                         String error, long durationMs) {}
+
+public enum NodeStatus { SUCCESS, FAILED, SKIPPED }
+```
+
+### LLM 데이터 (`com.returney.flow.api.llm`)
+
+`PipelineLifecycle.onLlmCall(...)` 콜백이 받는 데이터. 소비자가 직접 만들 일은 거의 없음.
+
+```java
+public record LlmRequest(
+    String prompt, String systemPrompt, List<Message> messages,
+    String model, int thinkingBudget, byte[] binaryContent,
+    String mimeType, CacheConfig cacheConfig) {
+
+    public record Message(String role, String content) {}
+    public record CacheConfig(boolean enabled) {}
+
+    public static LlmRequest single(String prompt, String model, int thinking) { ... }
+    public static LlmRequest conversation(...) { ... }
+    public static LlmRequest multimodal(...) { ... }
+}
+
+public record LlmRawResponse(String text, int promptTokens,
+                             int completionTokens, int totalTokens,
+                             int cacheCreationTokens, int cacheReadTokens) {}
+
+public class LlmCallException extends Exception { ... }
+public class LlmTransientException extends LlmCallException { ... }
+public class LlmNetworkException extends LlmTransientException { ... }
+public class LlmClientErrorException extends LlmCallException { ... }
+```
+
+---
+
+## flow-core (비공개 — 참고용)
+
+소비자가 import할 일이 없는 것들:
+
+| 구성요소 | 위치 (예정) | 역할 |
 |---|---|---|
-| `LlmExecutor` | LLM API 호출 | `LlmExecutorAdapter` |
-| `PromptRenderer` | 프롬프트 템플릿 렌더링 | `PromptRendererAdapter` |
-| `NodeOutputExtractor` | 노드 출력에서 필드 추출 | 코드젠 생성 (`*FieldExtractor`) |
-| `RateLimiter` | 요청/토큰 한도 관리 | `NoOpRateLimiter` (실제: `LlmProviderRouter`) |
-| `ExecutionListener` | 실행 이벤트 수신 | `PipelineExecutionListener` |
-| `ServerNodeExecutor` | 서버 커스텀 노드 실행 | 코드젠 생성 (`*ServerNodeExecutor`) |
+| `PipelineExecutor`, `NodeExecutor`, `LlmNodeRunner`, `NodeInputResolver` | `application/` | DAG 실행 엔진 |
+| `ExecutionContext` | `application/` | 런타임 가변 상태 |
+| `PipelineYamlParser`, `RateLimitYamlParser`, `ProvidersYamlParser` | `adapter/parser/` | yaml 로더 |
+| `ClasspathPromptRenderer` | `adapter/prompt/` | prompts/*.yaml 로드/렌더 |
+| `SlidingWindowRateLimiter` | `adapter/common/` | RPM/TPM 한도 |
+| `InternalLlmRouter` | `application/` | model → provider 매핑, failover |
+| `ClaudeLlmExecutor`, `GeminiLlmExecutor`, `GptLlmExecutor`, `ReasoningLlmExecutor` | `adapter/provider/{anthropic,gemini,openai}/` | HTTP 호출 |
+| `PipelineDefinition`, `PipelineNode`, `PipelineEdge`, `NodeType` | `application/definition/` | 파싱 결과 (내부) |
+| `FlowCore` | `com.returney.flow` | 부트스트랩 팩토리 (codegen만 사용) |
 
 ---
 
-### LlmExecutor
+## 소비자가 작성하는 yaml
 
-```java
-public interface LlmExecutor {
-    default void setSessionId(UUID sessionId) {}
-    default void setContext(String action, Map<String, String> variables) {}
-    LlmRawResponse execute(LlmRequest request) throws LlmCallException;
-}
-```
+### `pipeline-flow.yaml`
+DAG 선언. 변경 없음. (직전 SPI.md 참조)
 
-`execute()` 직전 `setContext()`를 호출해 로깅용 컨텍스트를 설정한다. `LlmRawResponse`는 `text()`, `totalTokens()` 등을 가진 record다.
+### `prompts/{action}.yaml`
+프롬프트 템플릿. 변경 없음. **클래스패스에서만 로드** (외부 디렉터리/hot-reload 미지원).
 
-**LlmRequest 팩토리:**
-
-```java
-LlmRequest.single(prompt, model, thinkingBudget)
-LlmRequest.conversation(systemPrompt, messages, model, thinkingBudget, new CacheConfig(true))
-LlmRequest.multimodal(textPrompt, binaryContent, mimeType, model, thinkingBudget)
-```
-
----
-
-### PromptRenderer
-
-```java
-public interface PromptRenderer {
-    String render(String action, Map<String, String> variables);
-
-    default String getModel(String action) { return null; }
-    default int getThinkingBudget(String action) { return -1; }
-    default String renderSystemPrompt(String action, Map<String, String> variables) { return null; }
-    default String renderUserPrompt(String action, Map<String, String> variables) { return null; }
-}
-```
-
-`renderSystemPrompt()`가 null이 아니면 대화형 모드(`LlmRequest.conversation`)로, null이면 단일 모드(`LlmRequest.single`)로 요청을 빌드한다.
-
----
-
-### NodeOutputExtractor
-
-```java
-@FunctionalInterface
-public interface NodeOutputExtractor {
-    String extract(String nodeId, String fieldName, String nodeOutput);
-}
-```
-
-`nodeId.fieldName` 형태의 입력 소스 참조를 해석한다. Gradle 코드젠이 YAML의 `result.type` 정보로부터 구현체(`*FieldExtractor.java`)를 자동 생성한다. 직접 구현하지 않는다.
-
----
-
-### RateLimiter
-
-```java
-public interface RateLimiter {
-    void acquire(String model, String sessionId, int estimatedTokens) throws InterruptedException;
-    void correct(String model, String sessionId, int actual);
-}
-```
-
-`LlmExecutorAdapter.execute()` 전후로 호출된다. Backend는 `NoOpRateLimiter`를 주입하며 실제 한도는 `LlmProviderRouter`가 처리한다. 독립 사용 시 `SlidingWindowRateLimiter`(60초 슬라이딩 윈도우, RPM/TPM) 구현체가 제공된다.
-
----
-
-### ExecutionListener
-
-```java
-public interface ExecutionListener {
-    void onNodeStarted(String nodeId, long timestamp);
-    void onNodeCompleted(String nodeId, NodeResult result);
-    void onNodeFailed(String nodeId, String error);
-    void onNodeSkipped(String nodeId);
-    void onFlowCompleted(PipelineResult result);
-}
-```
-
----
-
-### ServerNodeExecutor
-
-```java
-public interface ServerNodeExecutor {
-    boolean supports(String nodeId);
-    List<String> scatter(String nodeId, Map<String, String> inputs);
-    String gather(String nodeId, List<String> chunks);
-    String transform(String nodeId, Map<String, String> inputs);
-}
-```
-
-`SCATTER` / `GATHER` / `TRANSFORM` 타입 노드의 서버 로직을 구현한다. 코드젠이 구현 골격(`*ServerNodeExecutor.java`)을 생성하고 호출자가 메서드 본문을 채운다.
-
----
-
-## 노드 타입
-
-| 타입 | 동작 |
-|---|---|
-| `LLM` | `PromptRenderer`로 프롬프트를 빌드해 `LlmExecutor`를 호출한다 |
-| `LLM` (fan-out) | 업스트림 `SCATTER` 결과가 있으면 청크마다 Virtual Thread로 LLM을 병렬 실행한다 |
-| `TEMPLATE` | `PromptRenderer.render()` 결과 자체를 출력으로 사용한다 (LLM 호출 없음) |
-| `SCATTER` | `ServerNodeExecutor.scatter()`를 호출해 입력을 청크 목록으로 분해한다 |
-| `GATHER` | 업스트림 scatter 결과를 모아 `ServerNodeExecutor.gather()`로 병합한다 |
-| `TRANSFORM` | `ServerNodeExecutor.transform()`을 호출해 입력을 단일 문자열로 변환한다 |
-
-노드 실패 시 해당 노드와 모든 다운스트림이 `FAILED` / `SKIPPED` 처리된다. 다른 브랜치는 계속 실행된다.
-
----
-
-## 입력 소스 문법
-
-파이프라인 YAML의 `inputs` 섹션에서 각 변수의 값 소스를 지정한다.
-
-| 형식 | 의미 |
-|---|---|
-| `Prerequisites.name` | 파이프라인 외부 입력 (`prerequisites` 선언 필요) |
-| `nodeId` | 해당 노드의 output 전체 (String) |
-| `nodeId.fieldName` | 해당 노드 output을 JSON 역직렬화 후 `fieldName` 추출 |
-
-`nodeId.fieldName`은 코드젠이 컴파일 타임에 타입 안전하게 처리한다. 업스트림 노드의 `result.type`이 builtin(`String`, `Integer` 등)이면 dot-access는 허용되지 않는다.
-
----
-
-## YAML 계약
-
-### pipeline-flow.yaml
-
+### `providers.yaml` (신설, Phase 4a)
 ```yaml
-name: my-pipeline
-version: 1
+providers:
+  anthropic:
+    apiKeyEnv: ANTHROPIC_API_KEY
+    baseUrl: https://api.anthropic.com
+  gemini:
+    apiKeyEnv: GEMINI_API_KEY
+  openai:
+    apiKeyEnv: OPENAI_API_KEY
 
-prerequisites:        # Prerequisites.xxx 참조를 사용하려면 선언 필요
-  - sessionId
-  - reportText
-
-nodes:
-  - id: chunk_splitter
-    type: scatter
-    critical: false   # true이면 실패 시 전체 파이프라인 즉시 중단
-
-  - id: analyze
-    type: llm
-    action: analyze   # prompts/analyze.yaml과 매핑
-    critical: true
-    result:
-      type: com.example.AnalysisResult   # 코드젠 결과 record FQCN
-    inputs:
-      text: Prerequisites.reportText     # 외부 입력
-      chunks: chunk_splitter             # 다른 노드 output 전체
-      field: upstream.someField          # 다른 노드 output의 특정 필드
+models:
+  - name: claude-sonnet-4-6
+    provider: anthropic
+    fallback: [gemini-2.5-flash]
+  - name: gemini-2.5-flash
+    provider: gemini
+  - name: gpt-4.1-mini
+    provider: openai
+  - name: o4-mini
+    provider: openai
+    reasoning: true
 ```
 
-**파싱 검증** (`PipelineParseException`):
+### `rate-limits.yaml`
+모델별 RPM/TPM 한도. core 내부 사용.
+
+---
+
+## API 키 공급
+
+기본: `providers.yaml`의 `apiKeyEnv` → `System.getenv(...)`.
+
+오버라이드: `*PipelineBase`에 `protected String apiKey(String provider)` 메서드를 두어 Spring Vault, AWS Secrets Manager 등 외부 키 저장소와 연동 가능.
+
+---
+
+## codegen 산출물 (참고)
+
+소비자 빌드 디렉터리에 다음이 생성됨:
+
+| 파일 | 역할 |
+|---|---|
+| `*Prerequisites.java` | 외부 입력 record |
+| `*Result.java` | 최종 출력 record (typed) |
+| `*PipelineBase.java` | abstract — `Pipeline<P, R>` 구현체. 소비자가 상속 |
+
+옛 산출물(`*FieldExtractor`, `*LlmMiddleware`)은 Phase 4b 이후 내부 흡수되어 사라진다.
+
+---
+
+## codegen 빌드타임 검증
+
+빌드는 다음 정합성을 모두 확인하고, 실패 시 컴파일 단계에서 멈춘다.
+
 - 노드 ID 중복
-- `inputs` 소스가 존재하지 않는 노드를 참조
+- `inputs:` 소스 노드 존재
 - 순환 의존
-
-**코드젠 검증** (빌드 시):
-- `Prerequisites.xxx` 참조가 `prerequisites` 목록에 없는 이름을 사용
-
----
-
-### prompts/{action}.yaml
-
-```yaml
-action: analyze        # 필수. 노드의 action 값과 일치해야 함
-model: claude-sonnet-4-6
-thinking: 0            # 0: OFF, 양수: 토큰 예산
-
-# ── 단일 프롬프트 모드 ───────────────────────────────
-promptTemplate: |
-  분석하세요.
-  {{text}}
-
-# ── 대화형 모드 (system/user 분리) ──────────────────
-# systemTemplate이 존재하면 대화형 모드로 전송됨
-# systemTemplate은 Anthropic 프롬프트 캐싱 대상
-systemTemplate: |
-  매 턴 동일한 인스트럭션 → 캐시 적용.
-  {{methodology:full_prompt}}   # 중첩 섹션 참조
-
-userTemplate: |
-  매 턴 바뀌는 동적 컨텍스트.
-  {{userMessage}}
-
-methodology:           # {{methodology:full_prompt}} 치환에 사용
-  STAR:
-    full_prompt: |
-      STAR 가이드...
-```
-
-**변수 치환 규칙:**
-- `{{varName}}` → `variables.get("varName")`
-- `{{key:field}}` → `variables.get("key")`를 키로 삼아 YAML 내 `key.{value}.field` 값 삽입
-
----
-
-## 조립 (Wiring)
-
-```java
-// 코드젠이 생성한 구현체
-NodeInputResolver inputResolver =
-    new NodeInputResolver(new AnalysisPipelineFieldExtractor());
-
-LlmNodeRunner llmNodeRunner =
-    new LlmNodeRunner(llmExecutor, promptRenderer, inputResolver, executor);
-
-NodeExecutor nodeExecutor =
-    new NodeExecutor(llmNodeRunner, serverNodeExecutor, inputResolver, listener);
-
-PipelineExecutor pipeline =
-    new PipelineExecutor(nodeExecutor, listener, executor);
-
-// 실행
-PipelineDefinition definition = PipelineYamlParser.parse(yamlString);
-
-CompletableFuture<PipelineResult> future = pipeline.executeNodes(
-    definition,
-    sessionId,                   // String
-    nodeIds,                     // Set<String> — 실행할 노드 집합
-    ExecutionConfig.defaults(),  // 또는 .withModel("claude-sonnet-4-6")
-    null,                        // Map<String, NodeResult> seed (선택)
-    prerequisites);              // Map<String, String>
-```
+- `Prerequisites.xxx` 참조 ↔ `prerequisites:` 목록
+- `prompts/{action}.yaml` ↔ pipeline node `action` 1:1 매칭
+- prompt 변수 `{{x}}` ↔ node `inputs:` 키 매칭
+- `result.type` FQCN 클래스로더 존재 확인
+- `inputs:` dot-access 필드 ↔ 업스트림 result record 필드 매칭
+- prompt yaml의 `model` ↔ `providers.yaml` 모델 카탈로그 매칭

@@ -1,1 +1,3 @@
-rootProject.name = 'flow-core'
+rootProject.name = 'returney-flow'
+include 'flow-spi'
+include 'flow-core'
