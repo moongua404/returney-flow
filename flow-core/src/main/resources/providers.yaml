@@ -1,0 +1,40 @@
+# LLM 프로바이더 카탈로그.
+# InternalLlmRouter가 로드. 모델명 prefix로 프로바이더를 라우팅한다.
+#
+# 소비자가 자체 providers.yaml로 오버라이드하려면 클래스패스에 같은 경로로 두면 됨.
+
+providers:
+  gemini:
+    type: gemini
+    baseUrl: https://generativelanguage.googleapis.com/v1beta/models
+    apiKeyName: gemini
+  anthropic:
+    type: anthropic
+    baseUrl: https://api.anthropic.com
+    apiKeyName: anthropic
+  openai:
+    type: openai
+    baseUrl: https://api.openai.com
+    apiKeyName: openai
+  openai-reasoning:
+    type: openai-reasoning
+    baseUrl: https://api.openai.com
+    apiKeyName: openai
+
+# 모델명 prefix → 프로바이더 라우팅. 첫 매치 승리.
+# 더 긴 prefix가 위로 오도록 정렬해야 함 (gpt-5 > gpt-).
+routing:
+  - prefix: "gemini-"
+    provider: gemini
+  - prefix: "claude-"
+    provider: anthropic
+  - prefix: "gpt-5"
+    provider: openai-reasoning
+  - prefix: "o3-"
+    provider: openai-reasoning
+  - prefix: "o4-"
+    provider: openai-reasoning
+  - prefix: "gpt-"
+    provider: openai
+
+default: gemini-2.5-flash
