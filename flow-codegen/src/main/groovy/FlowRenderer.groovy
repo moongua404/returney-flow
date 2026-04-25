@@ -139,59 +139,20 @@ public class ${m.flowName}LlmMiddleware implements LlmExecutor {
     }
 
     static String pipelineBase(FlowModel m) {
+        [
+            renderHeader(m),
+            renderFieldsAndConstructor(m),
+            renderPublicMethods(m),
+            renderExtensionPoints(m),
+            renderUserOverrides(m),
+            renderInternals(m),
+        ].join('\n\n')
+    }
+
+    // ── pipelineBase sub-renderers ──────────────────────────────────────────
+
+    private static String renderHeader(FlowModel m) {
         def importBlock = importsBlock(m.resultNodes.collect { it.importLine }.findAll { it })
-
-        // LLM actions list for ClasspathPromptRenderer.forActions(...)
-        def actionsArg = m.llmActions.collect { '"' + it + '"' }.join(', ')
-
-        // Abstract server node methods
-        def abstractMethods = [
-            m.scatterNodes.collect { """\
-    protected abstract java.util.List<String> ${it.methodName.replace('Scatter', '')}Scatter(java.util.Map<String, String> inputs);""" },
-            m.gatherNodes.collect { """\
-    protected abstract String ${it.methodName.replace('Gather', '')}Gather(java.util.List<String> chunks);""" },
-            m.transformNodes.collect { """\
-    protected abstract String ${it.methodName.replace('Transform', '')}Transform(java.util.Map<String, String> inputs);""" }
-        ].flatten().join('\n\n')
-
-        // supports() cases
-        def supportedIds = m.serverNodes.collect { '"' + it.id + '"' }.join(', ')
-
-        def scatterCases = switchOrThrow(
-            m.scatterNodes.collect { """                case "${it.id}" -> ${it.methodName.replace('Scatter', '')}Scatter(inputs);""" },
-            "scatter")
-        def gatherCases = switchOrThrow(
-            m.gatherNodes.collect { """                case "${it.id}" -> ${it.methodName.replace('Gather', '')}Gather(chunks);""" },
-            "gather")
-        def transformCases = switchOrThrow(
-            m.transformNodes.collect { """                case "${it.id}" -> ${it.methodName.replace('Transform', '')}Transform(inputs);""" },
-            "transform")
-
-        // parseResult blocks — parseExpr uses "result.nodeResults()..." so param must be "result"
-        def parseBlocks = m.resultNodes.collect { node ->
-            def hookCall = node.hook
-                ? "\n        if (${node.field} != null) on${node.field.capitalize()}(${node.field});"
-                : ""
-            """\
-        ${node.javaType} ${node.field} = null;
-        if (!result.failedNodes().contains("${node.id}") && result.nodeResults().containsKey("${node.id}")) {
-            ${node.field} = ${node.parseExpr};
-        }${hookCall}"""
-        }.join('\n\n')
-
-        // hook methods (protected no-op, one per hook: true node)
-        def hookMethods = m.resultNodes.findAll { it.hook }.collect { node ->
-            "    protected void on${node.field.capitalize()}(${node.javaType} result) {}"
-        }.join('\n\n')
-
-        def resultArgs = m.resultNodes.collect { it.field }.join(', ')
-
-        // isCriticalFailure: critical nodes
-        def criticalIds = m.resultNodes.findAll { it.critical }.collect { '"' + it.id + '"' }.join(', ')
-        def criticalCheck = criticalIds
-            ? "var critical = java.util.Set.of(${criticalIds});\n        return raw.failedNodes().stream().anyMatch(critical::contains);"
-            : "return false;"
-
         """\
 package ${m.pkg};
 
@@ -220,8 +181,12 @@ import java.util.UUID;
 import java.util.concurrent.Executor;
 
 /** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
-public abstract class ${m.flowName}Base {
+public abstract class ${m.flowName}Base {"""
+    }
 
+    private static String renderFieldsAndConstructor(FlowModel m) {
+        def actionsArg = m.llmActions.collect { '"' + it + '"' }.join(', ')
+        """\
     private static final Gson GSON = new Gson();
 
     protected static final PipelineDefinition DEFINITION =
@@ -238,8 +203,14 @@ public abstract class ${m.flowName}Base {
 
     protected ${m.flowName}Base(Executor executor) {
         this.executor = executor;
+    }"""
     }
 
+    private static String renderPublicMethods(FlowModel m) {
+        def criticalChecks = m.resultNodes.findAll { it.critical }
+            .collect { "if (result.${it.field}() == null) return true;" }
+            .join('\n        ')
+        """\
     /**
      * 파이프라인을 실행하고 타입이 지정된 결과를 반환한다.
      *
@@ -275,10 +246,13 @@ public abstract class ${m.flowName}Base {
     /** 크리티컬 노드 실패 여부를 반환한다. */
     public final boolean isCriticalFailure(${m.flowName}Result result) {
         // 크리티컬 필드가 null이면 실패로 판단
-        ${m.resultNodes.findAll { it.critical }.collect { "if (result.${it.field}() == null) return true;" }.join('\n        ')}
+        ${criticalChecks}
         return false;
+    }"""
     }
 
+    private static String renderExtensionPoints(FlowModel m) {
+        """\
     /**
      * API 키 공급자. 기본은 환경변수({@code <NAME>_API_KEY}).
      * Spring Vault 등을 쓰려면 재정의한다.
@@ -320,10 +294,46 @@ public abstract class ${m.flowName}Base {
     /** LLM 미들웨어 팩토리. 재정의하여 LLM 호출을 가로챌 수 있다. */
     protected LlmExecutor createLlmMiddleware(LlmExecutor base) {
         return new ${m.flowName}LlmMiddleware(base);
+    }"""
     }
 
-${hookMethods ? hookMethods + '\n\n' : ''}${abstractMethods}
+    private static String renderUserOverrides(FlowModel m) {
+        def hookMethods = m.resultNodes.findAll { it.hook }.collect { node ->
+            "    protected void on${node.field.capitalize()}(${node.javaType} result) {}"
+        }.join('\n\n')
 
+        def abstractMethods = [
+            m.scatterNodes.collect { abstractServerSig(it, 'Scatter', 'java.util.List<String>', 'java.util.Map<String, String> inputs') },
+            m.gatherNodes.collect { abstractServerSig(it, 'Gather', 'String', 'java.util.List<String> chunks') },
+            m.transformNodes.collect { abstractServerSig(it, 'Transform', 'String', 'java.util.Map<String, String> inputs') }
+        ].flatten().join('\n\n')
+
+        hookMethods ? "${hookMethods}\n\n${abstractMethods}" : abstractMethods
+    }
+
+    private static String renderInternals(FlowModel m) {
+        def supportedIds = m.serverNodes.collect { '"' + it.id + '"' }.join(', ')
+        def scatterCases = switchOrThrow(
+            m.scatterNodes.collect { serverDispatchCase(it, 'Scatter', 'inputs') }, 'scatter')
+        def gatherCases = switchOrThrow(
+            m.gatherNodes.collect { serverDispatchCase(it, 'Gather', 'chunks') }, 'gather')
+        def transformCases = switchOrThrow(
+            m.transformNodes.collect { serverDispatchCase(it, 'Transform', 'inputs') }, 'transform')
+
+        def parseBlocks = m.resultNodes.collect { node ->
+            def hookCall = node.hook
+                ? "\n        if (${node.field} != null) on${node.field.capitalize()}(${node.field});"
+                : ""
+            """\
+        ${node.javaType} ${node.field} = null;
+        if (!result.failedNodes().contains("${node.id}") && result.nodeResults().containsKey("${node.id}")) {
+            ${node.field} = ${node.parseExpr};
+        }${hookCall}"""
+        }.join('\n\n')
+
+        def resultArgs = m.resultNodes.collect { it.field }.join(', ')
+
+        """\
     // ── internal ─────────────────────────────────────────────────────────────
 
     private ServerNodeExecutor buildServerNodeExecutor() {
@@ -354,6 +364,18 @@ ${parseBlocks}
     }
 }
 """
+    }
+
+    /** scatter/gather/transform 추상 메서드 시그니처 한 줄. */
+    private static String abstractServerSig(FlowModel.ServerNode node, String suffix, String returnType, String params) {
+        def methodName = node.methodName.replace(suffix, '') + suffix
+        "    protected abstract ${returnType} ${methodName}(${params});"
+    }
+
+    /** ServerNodeExecutor 익명 구현의 switch case 한 줄. */
+    private static String serverDispatchCase(FlowModel.ServerNode node, String suffix, String argName) {
+        def methodName = node.methodName.replace(suffix, '') + suffix
+        """                case "${node.id}" -> ${methodName}(${argName});"""
     }
 
     // ── template utilities ────────────────────────────────────────────────────
