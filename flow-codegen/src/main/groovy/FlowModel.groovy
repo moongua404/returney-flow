@@ -192,6 +192,7 @@ class FlowModel {
 
     static String camelField(String snakeId) {
         def parts = snakeId.split('_')
+        if (parts.length == 1) return parts[0]
         parts[0] + parts[1..-1].collect { it.capitalize() }.join('')
     }
 

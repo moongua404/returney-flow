@@ -1,5 +1,8 @@
 # returney-flow
 
+[![CI](https://github.com/moongua404/returney-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/moongua404/returney-flow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 YAML 선언형 DAG LLM 파이프라인 라이브러리.
 
 소비자는 yaml로 파이프라인을 선언하고 빌드 시 코드젠으로 타입 안전한 진입 클래스를 받는다.
@@ -171,3 +174,21 @@ cd flow-codegen && ../gradlew compileGroovy
 - flow-spi: JDK 21 only (외부 의존 0)
 - flow-core: snakeyaml 2.3, gson 2.11
 - flow-codegen: snakeyaml 2.3 (Groovy DSL)
+
+---
+
+## 테스트 커버리지
+
+- flow-core: 49개 단위/통합 테스트 (PipelineExecutor DAG 시나리오, InternalLlmRouter retry/fallback, SlidingWindowRateLimiter, ProvidersYamlParser 등)
+- flow-codegen: FlowValidator 6 룰 + FlowModel + FlowRenderer 산출물 + FlowInterfaceGenerator e2e
+
+```bash
+./gradlew :flow-core:test
+cd flow-codegen && ../gradlew test
+```
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
