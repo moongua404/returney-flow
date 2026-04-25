@@ -9,7 +9,8 @@ import java.util.Map;
  * @param providers 프로바이더 정의 (key = providerName)
  * @param routing 모델명 prefix → providerName 매핑 (첫 매치 승리)
  * @param defaultModel 호출 시 model이 비어있을 때 사용할 기본 모델명
- * @param capabilities 모델별 capability (선택). 없으면 모든 모델이 supportsThinking=false
+ * @param capabilities 모델별 capability (선택). 없으면 supportsThinking=false
+ * @param rateLimits 모델별 rate limit (선택). 없으면 한도 없음
  * @param fallbackChain 모델별 1단 fallback 매핑. exact → prefix → "default" 순으로 조회
  */
 public record ProvidersConfig(
@@ -17,6 +18,7 @@ public record ProvidersConfig(
     List<RoutingRule> routing,
     String defaultModel,
     Map<String, ModelCapability> capabilities,
+    Map<String, ModelLimits> rateLimits,
     Map<String, String> fallbackChain) {
 
   /**
@@ -41,6 +43,14 @@ public record ProvidersConfig(
     public static final ModelCapability NONE = new ModelCapability(false, 0);
   }
 
+  /**
+   * 모델 rate limit (60초 슬라이딩 윈도우).
+   *
+   * @param rpm requests per minute (양수)
+   * @param tpm tokens per minute (양수)
+   */
+  public record ModelLimits(int rpm, long tpm) {}
+
   /** model 명에 매칭되는 providerName 반환. 매치 없으면 null. */
   public String resolveProvider(String model) {
     if (model == null || model.isBlank()) return null;
@@ -54,6 +64,12 @@ public record ProvidersConfig(
   public ModelCapability capability(String model) {
     if (model == null) return ModelCapability.NONE;
     return capabilities.getOrDefault(model, ModelCapability.NONE);
+  }
+
+  /** 모델 rate limit 반환. 미등록이면 null (= 무제한). */
+  public ModelLimits limits(String model) {
+    if (model == null) return null;
+    return rateLimits.get(model);
   }
 
   /**

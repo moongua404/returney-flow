@@ -1,5 +1,6 @@
 package com.returney.flow.application;
 
+import com.returney.flow.adapter.common.SlidingWindowRateLimiter;
 import com.returney.flow.adapter.parser.ProvidersConfig;
 import com.returney.flow.adapter.parser.ProvidersYamlParser;
 import com.returney.flow.adapter.provider.anthropic.ClaudeLlmExecutor;
@@ -14,6 +15,7 @@ import com.returney.flow.domain.llm.LlmRequest;
 import com.returney.flow.port.ApiKeySupplier;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
+import com.returney.flow.port.RateLimiter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -23,13 +25,21 @@ import java.util.UUID;
  *
  * <p>flow-core 내부 구현. 코드젠이 만든 *PipelineBase가 자동 사용.
  *
- * <p>호출 1회마다 {@link ExecutionListener#onLlmCall} 이벤트를 발행한다 (성공/실패 모두).
- * failover는 Phase 4b-2에서 추가 예정.
+ * <p>각 호출은 다음 단계를 거친다:
+ * <ol>
+ *   <li>모델 → 프로바이더 라우팅 + capability 보정 (thinking budget cap)
+ *   <li>{@link RateLimiter#acquire} 슬롯 획득 (한도 초과 시 블로킹)
+ *   <li>프로바이더 executor.execute() 호출
+ *   <li>응답으로 {@link RateLimiter.Reservation#confirm} 보정
+ *   <li>{@link ExecutionListener#onLlmCall} 이벤트 발행 (성공/실패 모두)
+ *   <li>실패 시 fallback 모델 1단 재시도 (위 단계 반복, attemptIndex=1)
+ * </ol>
  */
 public final class InternalLlmRouter implements LlmExecutor {
 
   private final ProvidersConfig config;
   private final Map<String, LlmExecutor> executors;
+  private final RateLimiter rateLimiter;
 
   // 컨텍스트는 호출 스레드별로 보관. virtual thread fan-out에선 호출 직전 setX가 매번 일어남.
   private final ThreadLocal<UUID> currentSessionId = new ThreadLocal<>();
@@ -37,23 +47,39 @@ public final class InternalLlmRouter implements LlmExecutor {
   private final ThreadLocal<ExecutionListener> currentListener =
       ThreadLocal.withInitial(ExecutionListener::noop);
 
-  private InternalLlmRouter(ProvidersConfig config, Map<String, LlmExecutor> executors) {
+  private InternalLlmRouter(
+      ProvidersConfig config, Map<String, LlmExecutor> executors, RateLimiter rateLimiter) {
     this.config = config;
     this.executors = executors;
+    this.rateLimiter = rateLimiter;
   }
 
-  /** 테스트 전용 — 명시적 executor 맵으로 라우터 생성. */
+  /** 테스트 전용 — 명시적 executor 맵 + 한도 없는 limiter. */
   static InternalLlmRouter forTesting(ProvidersConfig config, Map<String, LlmExecutor> executors) {
-    return new InternalLlmRouter(config, new HashMap<>(executors));
+    return new InternalLlmRouter(config, new HashMap<>(executors), RateLimiter.unlimited());
+  }
+
+  /** 테스트 전용 — 명시적 executor 맵 + 명시적 limiter. */
+  static InternalLlmRouter forTesting(
+      ProvidersConfig config, Map<String, LlmExecutor> executors, RateLimiter rateLimiter) {
+    return new InternalLlmRouter(config, new HashMap<>(executors), rateLimiter);
   }
 
   /** 클래스패스 {@code providers.yaml} + 환경변수 키로 라우터 생성. */
   public static InternalLlmRouter fromClasspath() {
-    return from(ProvidersYamlParser.loadFromClasspath(), ApiKeySupplier.fromEnv());
+    ProvidersConfig config = ProvidersYamlParser.loadFromClasspath();
+    return from(config, ApiKeySupplier.fromEnv(),
+        new SlidingWindowRateLimiter(config.rateLimits()));
   }
 
-  /** 명시적 키 공급자로 라우터 생성. */
+  /** 명시적 키 공급자 + 디폴트 SlidingWindowRateLimiter로 라우터 생성. */
   public static InternalLlmRouter from(ProvidersConfig config, ApiKeySupplier keys) {
+    return from(config, keys, new SlidingWindowRateLimiter(config.rateLimits()));
+  }
+
+  /** 명시적 키 공급자 + 명시적 RateLimiter로 라우터 생성. */
+  public static InternalLlmRouter from(
+      ProvidersConfig config, ApiKeySupplier keys, RateLimiter rateLimiter) {
     Map<String, LlmExecutor> executors = new HashMap<>();
     for (var entry : config.providers().entrySet()) {
       String providerName = entry.getKey();
@@ -66,7 +92,7 @@ public final class InternalLlmRouter implements LlmExecutor {
       LlmExecutor exec = buildExecutor(p, key);
       if (exec != null) executors.put(providerName, exec);
     }
-    return new InternalLlmRouter(config, executors);
+    return new InternalLlmRouter(config, executors, rateLimiter);
   }
 
   private static LlmExecutor buildExecutor(ProvidersConfig.ProviderEntry p, String apiKey) {
@@ -133,15 +159,27 @@ public final class InternalLlmRouter implements LlmExecutor {
               + "(missing API key for model=" + model + ")");
     }
 
+    int estimated = estimateTokens(request);
+    RateLimiter.Reservation reservation;
+    try {
+      reservation = rateLimiter.acquire(model, estimated);
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      throw new LlmCallException("Rate limit acquire interrupted for model=" + model, ie);
+    }
+
     long start = System.currentTimeMillis();
     try {
       LlmRawResponse response = exec.execute(request);
       long latency = System.currentTimeMillis() - start;
+      reservation.confirm(response.totalTokens());
       safelyEmit(listener,
           LlmCallEvent.success(sessionId, action, request, response, model, latency, attemptIndex));
       return response;
     } catch (RuntimeException e) {
       long latency = System.currentTimeMillis() - start;
+      // 실패 시에도 reservation 해소 (estimate 그대로 카운트되도록 0이 아닌 estimated로 confirm).
+      reservation.confirm(estimated);
       safelyEmit(listener,
           LlmCallEvent.failure(sessionId, action, request, model, latency, e, attemptIndex));
       throw e;
@@ -149,9 +187,23 @@ public final class InternalLlmRouter implements LlmExecutor {
   }
 
   /**
+   * 요청의 추정 토큰 수. ~4자=1토큰의 거친 휴리스틱. acquire 시 윈도우 점유분으로 사용되고
+   * confirm 시 실제 totalTokens로 보정된다.
+   */
+  private static int estimateTokens(LlmRequest request) {
+    int chars = 0;
+    if (request.singlePrompt() != null) chars += request.singlePrompt().length();
+    if (request.systemPrompt() != null) chars += request.systemPrompt().length();
+    if (request.messages() != null) {
+      for (LlmRequest.Message m : request.messages()) chars += m.content().length();
+    }
+    return Math.max(1, chars / 4);
+  }
+
+  /**
    * fallback 트리거 여부. 4xx/auth 같은 항구적 오류는 굳이 fallback 안 함.
    * 보수적으로: LlmCallException 자체의 cause나 메시지로 transient 판단. 지금은 단순화 —
-   * 모든 RuntimeException이 fallback 대상. Phase 4b-3 또는 백엔드 sweep에서 정교화.
+   * 모든 RuntimeException이 fallback 대상. 백엔드 sweep에서 정교화.
    */
   private static boolean isFallbackEligible(Throwable error) {
     return true;

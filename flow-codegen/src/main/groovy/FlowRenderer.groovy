@@ -196,7 +196,10 @@ public class ${m.flowName}LlmMiddleware implements LlmExecutor {
 package ${m.pkg};
 
 import com.google.gson.Gson;
+import com.returney.flow.adapter.common.SlidingWindowRateLimiter;
 import com.returney.flow.adapter.parser.PipelineYamlParser;
+import com.returney.flow.adapter.parser.ProvidersConfig;
+import com.returney.flow.adapter.parser.ProvidersYamlParser;
 import com.returney.flow.adapter.prompt.ClasspathPromptRenderer;
 import com.returney.flow.application.InternalLlmRouter;
 import com.returney.flow.domain.definition.PipelineDefinition;
@@ -208,6 +211,7 @@ import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.port.PipelineRunner;
 import com.returney.flow.port.PromptRenderer;
+import com.returney.flow.port.RateLimiter;
 import com.returney.flow.port.ServerNodeExecutor;${importBlock}
 import java.util.List;
 import java.util.Map;
@@ -225,6 +229,9 @@ public abstract class ${m.flowName}Base {
 
     private static final PromptRenderer RENDERER =
         ClasspathPromptRenderer.forActions(${actionsArg});
+
+    private static final ProvidersConfig PROVIDERS_CONFIG =
+        ProvidersYamlParser.loadFromClasspath();
 
     private final Executor executor;
     private volatile LlmExecutor cachedLlmExecutor;
@@ -281,13 +288,19 @@ public abstract class ${m.flowName}Base {
     }
 
     /**
+     * Rate limiter. 기본은 providers.yaml의 models.*.rate에서 구성한
+     * {@link SlidingWindowRateLimiter}. 분산 한도 등을 쓰려면 재정의한다.
+     */
+    protected RateLimiter rateLimiter() {
+        return new SlidingWindowRateLimiter(PROVIDERS_CONFIG.rateLimits());
+    }
+
+    /**
      * LLM 실행기 팩토리. 기본은 {@link InternalLlmRouter} (providers.yaml 기반 라우팅).
      * 외부 게이트웨이 등을 쓰려면 재정의한다.
      */
     protected LlmExecutor createLlmExecutor() {
-        return InternalLlmRouter.from(
-            com.returney.flow.adapter.parser.ProvidersYamlParser.loadFromClasspath(),
-            apiKeySupplier());
+        return InternalLlmRouter.from(PROVIDERS_CONFIG, apiKeySupplier(), rateLimiter());
     }
 
     private LlmExecutor llmExecutor() {

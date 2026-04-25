@@ -39,34 +39,46 @@ routing:
 
 default: gemini-2.5-flash
 
-# 모델별 capability. supportsThinking이 false면 thinking budget이 0으로 강제됨.
-# 누락된 모델은 supportsThinking=false 기본값.
-capabilities:
+# 모델별 attribute. 라우팅과 별개로, 모델 단위 quota/capability를 모은다.
+# - supportsThinking: false면 thinkingBudget이 0으로 강제됨
+# - thinkingMaxBudget: 양수면 budget이 이 값으로 cap
+# - rate: 60초 슬라이딩 윈도우 한도. 미명시면 무제한 (1회 stderr 경고)
+models:
   gemini-2.5-flash:
     supportsThinking: true
     thinkingMaxBudget: 65536
+    rate: { rpm: 2000, tpm: 4000000 }
   gemini-2.5-flash-lite:
     supportsThinking: false
+    rate: { rpm: 4000, tpm: 4000000 }
   gemini-2.5-pro:
     supportsThinking: true
     thinkingMaxBudget: 65536
+    rate: { rpm: 1000, tpm: 4000000 }
   gemini-2.0-flash:
     supportsThinking: true
     thinkingMaxBudget: 65536
+    rate: { rpm: 2000, tpm: 4000000 }
   gemini-2.0-flash-lite:
     supportsThinking: false
+    rate: { rpm: 4000, tpm: 4000000 }
   claude-sonnet-4-6:
     supportsThinking: true
     thinkingMaxBudget: 32000
+    rate: { rpm: 50, tpm: 80000 }
   claude-haiku-4-5:
     supportsThinking: true
     thinkingMaxBudget: 10000
+    rate: { rpm: 100, tpm: 200000 }
   gpt-4.1-mini:
     supportsThinking: false
+    rate: { rpm: 500, tpm: 2000000 }
   gpt-5-mini:
     supportsThinking: false
+    rate: { rpm: 500, tpm: 2000000 }
   gpt-4.1:
     supportsThinking: false
+    rate: { rpm: 500, tpm: 800000 }
 
 # 모델 fallback 체인. exact key 우선, 없으면 prefix 매칭, 없으면 'default' 키 사용.
 # fallback이 또 실패하면 끝까지 따라가지 않고 거기서 멈춤 (1단 fallback).

@@ -77,14 +77,29 @@ public final class ProvidersYamlParser {
     }
 
     Map<String, ProvidersConfig.ModelCapability> capabilities = new LinkedHashMap<>();
-    Map<String, Object> rawCaps = (Map<String, Object>) root.getOrDefault("capabilities", Map.of());
-    for (var entry : rawCaps.entrySet()) {
-      Map<String, Object> c = (Map<String, Object>) entry.getValue();
-      boolean supportsThinking = Boolean.TRUE.equals(c.get("supportsThinking"));
+    Map<String, ProvidersConfig.ModelLimits> rateLimits = new LinkedHashMap<>();
+    Map<String, Object> rawModels = (Map<String, Object>) root.getOrDefault("models", Map.of());
+    for (var entry : rawModels.entrySet()) {
+      String name = entry.getKey();
+      Map<String, Object> m = (Map<String, Object>) entry.getValue();
+
+      boolean supportsThinking = Boolean.TRUE.equals(m.get("supportsThinking"));
       int maxBudget =
-          c.get("thinkingMaxBudget") instanceof Number n ? n.intValue() : 0;
-      capabilities.put(
-          entry.getKey(), new ProvidersConfig.ModelCapability(supportsThinking, maxBudget));
+          m.get("thinkingMaxBudget") instanceof Number n ? n.intValue() : 0;
+      capabilities.put(name, new ProvidersConfig.ModelCapability(supportsThinking, maxBudget));
+
+      Object rate = m.get("rate");
+      if (rate instanceof Map) {
+        Map<String, Object> r = (Map<String, Object>) rate;
+        int rpm = r.get("rpm") instanceof Number n ? n.intValue() : 0;
+        long tpm = r.get("tpm") instanceof Number n ? n.longValue() : 0L;
+        if (rpm > 0 && tpm > 0) {
+          rateLimits.put(name, new ProvidersConfig.ModelLimits(rpm, tpm));
+        } else {
+          throw new IllegalArgumentException(
+              "models." + name + ".rate must have positive 'rpm' and 'tpm'");
+        }
+      }
     }
 
     Map<String, String> fallbackChain = new LinkedHashMap<>();
@@ -93,6 +108,7 @@ public final class ProvidersYamlParser {
       if (entry.getValue() instanceof String fb) fallbackChain.put(entry.getKey(), fb);
     }
 
-    return new ProvidersConfig(providers, routing, defaultModel, capabilities, fallbackChain);
+    return new ProvidersConfig(
+        providers, routing, defaultModel, capabilities, rateLimits, fallbackChain);
   }
 }

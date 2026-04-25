@@ -37,7 +37,7 @@ returney-flow/
 | `LlmExecutor` | LLM 호출 추상화 | flow-core `InternalLlmRouter` (디폴트) |
 | `PromptRenderer` | 프롬프트 템플릿 렌더링 | flow-core `ClasspathPromptRenderer` |
 | `NodeOutputExtractor` | 노드 출력 필드 추출 | codegen 생성 (`*FieldExtractor`) |
-| `RateLimiter` | RPM/TPM 한도 관리 | flow-core `SlidingWindowRateLimiter` |
+| `RateLimiter` | RPM/TPM 한도 관리 (Reservation 기반) | flow-core `SlidingWindowRateLimiter`, 모델별 윈도우 |
 | `ExecutionListener` | 노드/플로우/LLM 이벤트 콜백 | 소비자 구현 (e.g. DB 적재) |
 | `ServerNodeExecutor` | scatter/gather/transform 서버 로직 | codegen 생성 (`*PipelineBase`의 익명 클래스) |
 | `ApiKeySupplier` | 프로바이더 API 키 공급 | 디폴트: 환경변수 |
@@ -191,10 +191,11 @@ routing:
 
 default: gemini-2.5-flash    # request.model이 비면 이 값으로 보강
 
-capabilities:                # supportsThinking=false면 budget 강제 0
+models:                      # 모델별 attribute. 라우팅과 별개로 모델 단위 설정.
   claude-sonnet-4-6:
     supportsThinking: true
     thinkingMaxBudget: 32000
+    rate: { rpm: 50, tpm: 80000 }   # 60초 슬라이딩 윈도우. 미명시면 무제한
 
 fallback:                    # 1단 fallback. exact → prefix → 'default'
   claude-sonnet-4-6: claude-haiku-4-5

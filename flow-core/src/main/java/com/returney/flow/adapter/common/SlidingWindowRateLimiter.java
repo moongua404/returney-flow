@@ -1,5 +1,6 @@
 package com.returney.flow.adapter.common;
 
+import com.returney.flow.adapter.parser.ProvidersConfig.ModelLimits;
 import com.returney.flow.port.RateLimiter;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -8,37 +9,56 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * RPM/TPM 기반 슬라이딩 윈도우 {@link RateLimiter} 구현체.
+ * RPM/TPM 기반 60초 슬라이딩 윈도우 {@link RateLimiter}.
  *
- * <p>60초 윈도우 기준으로 요청 수(RPM)와 토큰 수(TPM)를 제한한다.
- * 싱글톤으로 운용되며 모델별 윈도우를 내부적으로 관리한다.
- * 허용 모델과 한도는 생성자에서 prefix → [rpm, tpm] 맵으로 주입한다.
+ * <p>모델별로 독립 윈도우를 보유한다. acquire는 한도 초과 시 블로킹하고,
+ * 반환된 {@link Reservation}으로 응답 수신 후 실제 토큰을 보정한다.
+ *
+ * <p>등록되지 않은 모델은 무제한 통과 (1회 stderr 경고). 부정확한 카운팅보다
+ * "한도 모름"을 정직하게 알리는 쪽이 안전.
+ *
+ * <p>Reservation은 thread-safe하지 않다 — confirm은 acquire를 호출한 스레드에서
+ * 호출되어야 한다 (LlmNodeRunner의 호출 패턴이 그렇게 되어 있음).
  */
-public class SlidingWindowRateLimiter implements RateLimiter {
+public final class SlidingWindowRateLimiter implements RateLimiter {
 
   public final AtomicLong waitCount = new AtomicLong();
 
-  private final Map<String, int[]> prefixLimits;
+  private final Map<String, ModelLimits> limits;
   private final ConcurrentHashMap<String, ModelWindow> windows = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Boolean> warnedUnregistered = new ConcurrentHashMap<>();
 
-  public SlidingWindowRateLimiter(Map<String, int[]> prefixLimits) {
-    this.prefixLimits = prefixLimits;
+  public SlidingWindowRateLimiter(Map<String, ModelLimits> limits) {
+    this.limits = Map.copyOf(limits);
   }
 
   @Override
-  public void acquire(String model, String sessionId, int estimatedTokens)
-      throws InterruptedException {
-    ModelWindow window = getOrCreate(model);
+  public Reservation acquire(String model, int estimatedTokens) throws InterruptedException {
+    ModelLimits cfg = limits.get(model);
+    if (cfg == null) {
+      if (warnedUnregistered.putIfAbsent(model, Boolean.TRUE) == null) {
+        System.err.println(
+            "[RateLimiter] WARN: model '" + model + "' has no rate limit configured "
+                + "(no entry in providers.yaml models.*.rate). Calls will pass unmetered.");
+      }
+      return NOOP_RESERVATION;
+    }
+
+    int est = Math.max(1, estimatedTokens);
+    ModelWindow window = windows.computeIfAbsent(
+        model, m -> new ModelWindow(cfg.rpm(), cfg.tpm()));
+
     boolean waited = false;
     synchronized (window.lock) {
       while (true) {
         window.purge();
         if (window.requestWindow.size() < window.maxRpm
-            && window.tokenSum() + estimatedTokens <= window.maxTpm) {
+            && window.tokenSum() + est <= window.maxTpm) {
           long now = System.currentTimeMillis();
+          long[] entry = new long[]{now, est};
           window.requestWindow.addLast(now);
-          window.tokenWindow.addLast(new long[]{now, estimatedTokens});
-          return;
+          window.tokenWindow.addLast(entry);
+          return new ReservationImpl(window, entry, est);
         }
         if (!waited) {
           waitCount.incrementAndGet();
@@ -49,39 +69,35 @@ public class SlidingWindowRateLimiter implements RateLimiter {
     }
   }
 
-  @Override
-  public void correct(String model, String sessionId, int actual) {
-    ModelWindow window = windows.get(model);
-    if (window == null) return;
-    synchronized (window.lock) {
-      if (!window.tokenWindow.isEmpty()) {
-        long[] last = window.tokenWindow.peekLast();
-        long delta = actual - last[1];
-        last[1] = actual;
-        if (delta < 0) window.lock.notifyAll();
-      }
-      window.lock.notifyAll();
+  // ── internals ──
+
+  private static final Reservation NOOP_RESERVATION = actualTokens -> {};
+
+  private static final class ReservationImpl implements Reservation {
+    private final ModelWindow window;
+    private final long[] entry;        // 자기가 추가한 [timestamp, tokenCount] 핸들
+    private final int estimated;
+    private boolean consumed = false;
+
+    ReservationImpl(ModelWindow window, long[] entry, int estimated) {
+      this.window = window;
+      this.entry = entry;
+      this.estimated = estimated;
     }
-  }
 
-  private ModelWindow getOrCreate(String model) {
-    return windows.computeIfAbsent(model, m -> {
-      int[] limits = resolveLimits(m);
-      return new ModelWindow(limits[0], limits[1]);
-    });
-  }
-
-  private int[] resolveLimits(String model) {
-    if (model != null) {
-      for (Map.Entry<String, int[]> e : prefixLimits.entrySet()) {
-        if (model.startsWith(e.getKey())) return e.getValue();
+    @Override
+    public void confirm(int actualTokens) {
+      if (consumed) return;            // 일회성 보장 — 재호출은 무시
+      consumed = true;
+      int actual = Math.max(0, actualTokens);
+      synchronized (window.lock) {
+        entry[1] = actual;
+        if (actual < estimated) window.lock.notifyAll();   // 토큰 풀려서 대기 자 깨움
       }
     }
-    throw new IllegalArgumentException(
-        "Unregistered model: \"" + model + "\". Add a prefix entry in rate-limits.yaml.");
   }
 
-  private static class ModelWindow {
+  private static final class ModelWindow {
     final int maxRpm;
     final long maxTpm;
     final Deque<Long> requestWindow = new ArrayDeque<>();
