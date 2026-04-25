@@ -69,7 +69,9 @@ public interface ExecutionListener {
 }
 ```
 
-`onLlmCall(event)`로 cost 계산, 토큰 적재, 메트릭, fallback 추적이 가능하다. `event.attemptIndex()`가 0이면 1차, 1+이면 fallback 시도.
+`onLlmCall(event)`로 cost 계산, 토큰 적재, 메트릭, retry/fallback 추적이 가능하다.
+`event.attemptIndex()`는 호출 시도 일련번호: `0..maxAttempts-1`이면 primary 모델의
+n차 시도, `maxAttempts` 이상이면 fallback 모델의 시도. 자세한 동작은 아래 "Retry / fallback 동작" 참조.
 
 ---
 
