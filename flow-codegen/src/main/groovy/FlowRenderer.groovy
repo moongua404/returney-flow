@@ -190,7 +190,7 @@ public abstract class ${m.flowName}Base {"""
     private static final Gson GSON = new Gson();
 
     protected static final PipelineDefinition DEFINITION =
-        new PipelineYamlParser().parseFromClasspath("pipeline-flow.yaml");
+        new PipelineYamlParser().parseFromClasspath("${m.yamlResourcePath}");
 
     private static final PromptRenderer RENDERER =
         ClasspathPromptRenderer.forActions(${actionsArg});

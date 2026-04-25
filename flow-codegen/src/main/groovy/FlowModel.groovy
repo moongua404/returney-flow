@@ -2,6 +2,7 @@ class FlowModel {
 
     final String flowName
     final String pkg
+    final String yamlResourcePath  // 클래스패스 yaml 파일명 (예: "chat-flow.yaml")
     final List<String> prerequisites
     final List<ResultNode> resultNodes
     final List<ServerNode> serverNodes
@@ -11,25 +12,31 @@ class FlowModel {
     final List<FieldRef> fieldRefs
     final List<String> llmActions  // actions from llm/template nodes (for ClasspathPromptRenderer)
 
-    private FlowModel(String flowName, String pkg,
+    private FlowModel(String flowName, String pkg, String yamlResourcePath,
                       List<String> prerequisites,
                       List<ResultNode> resultNodes,
                       List<ServerNode> serverNodes,
                       List<FieldRef> fieldRefs,
                       List<String> llmActions) {
-        this.flowName       = flowName
-        this.pkg            = pkg
-        this.prerequisites  = prerequisites
-        this.resultNodes    = resultNodes
-        this.serverNodes    = serverNodes
-        this.scatterNodes   = serverNodes.findAll { it.type == 'scatter' }
-        this.gatherNodes    = serverNodes.findAll { it.type == 'gather' }
-        this.transformNodes = serverNodes.findAll { it.type == 'transform' }
-        this.fieldRefs      = fieldRefs
-        this.llmActions     = llmActions
+        this.flowName          = flowName
+        this.pkg               = pkg
+        this.yamlResourcePath  = yamlResourcePath
+        this.prerequisites     = prerequisites
+        this.resultNodes       = resultNodes
+        this.serverNodes       = serverNodes
+        this.scatterNodes      = serverNodes.findAll { it.type == 'scatter' }
+        this.gatherNodes       = serverNodes.findAll { it.type == 'gather' }
+        this.transformNodes    = serverNodes.findAll { it.type == 'transform' }
+        this.fieldRefs         = fieldRefs
+        this.llmActions        = llmActions
     }
 
+    /** 단일 yaml 모델 (yamlResourcePath 미지정 시 'pipeline-flow.yaml' 호환 경로 사용). */
     static FlowModel from(Map pipeline, String pkg) {
+        return from(pipeline, pkg, 'pipeline-flow.yaml')
+    }
+
+    static FlowModel from(Map pipeline, String pkg, String yamlResourcePath) {
         def flowName = toCamelCase(pipeline.name as String)
         def allNodes = pipeline.nodes as List<Map>
         def prereqs  = (pipeline.prerequisites as List<String>) ?: []
@@ -51,7 +58,8 @@ class FlowModel {
             .collect { ((it.action ?: it.id) as String) }
             .unique()
 
-        new FlowModel(flowName, pkg, prereqs, resultNodes, serverNodes, fieldRefs, llmActions)
+        new FlowModel(flowName, pkg, yamlResourcePath,
+            prereqs, resultNodes, serverNodes, fieldRefs, llmActions)
     }
 
     // ── inner model classes ───────────────────────────────────────────────────
