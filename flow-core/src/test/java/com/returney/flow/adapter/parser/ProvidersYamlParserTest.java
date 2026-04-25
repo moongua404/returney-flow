@@ -94,6 +94,56 @@ class ProvidersYamlParserTest {
   }
 
   @Test
+  void defaults_섹션_없으면_HttpDefaults_DEFAULT() {
+    String yaml =
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        """;
+
+    ProvidersConfig config = ProvidersYamlParser.parse(yaml);
+    assertThat(config.defaults()).isEqualTo(ProvidersConfig.HttpDefaults.DEFAULT);
+  }
+
+  @Test
+  void defaults_섹션_파싱() {
+    String yaml =
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        defaults:
+          connectTimeoutSec: 5
+          requestTimeoutSec: 60
+        """;
+
+    ProvidersConfig config = ProvidersYamlParser.parse(yaml);
+    assertThat(config.defaults().connectTimeoutSec()).isEqualTo(5);
+    assertThat(config.defaults().requestTimeoutSec()).isEqualTo(60);
+  }
+
+  @Test
+  void HttpDefaults_부정값_거부() {
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> new ProvidersConfig.HttpDefaults(0, 60))
+        .isInstanceOf(IllegalArgumentException.class);
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () -> new ProvidersConfig.HttpDefaults(10, 0))
+        .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
   void retry_부분_명시는_나머지_DEFAULT_사용() {
     String yaml =
         """

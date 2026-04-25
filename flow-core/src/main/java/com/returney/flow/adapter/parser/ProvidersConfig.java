@@ -13,6 +13,7 @@ import java.util.Map;
  * @param rateLimits 모델별 rate limit (선택). 없으면 한도 없음
  * @param fallbackChain 모델별 1단 fallback 매핑. exact → prefix → "default" 순으로 조회
  * @param retryPolicy transient 오류 재시도 정책. 없으면 RetryPolicy.DEFAULT
+ * @param defaults HTTP timeout 등 공통 기본값. 없으면 HttpDefaults.DEFAULT
  */
 public record ProvidersConfig(
     Map<String, ProviderEntry> providers,
@@ -21,7 +22,8 @@ public record ProvidersConfig(
     Map<String, ModelCapability> capabilities,
     Map<String, ModelLimits> rateLimits,
     Map<String, String> fallbackChain,
-    RetryPolicy retryPolicy) {
+    RetryPolicy retryPolicy,
+    HttpDefaults defaults) {
 
   /**
    * 프로바이더 정의.
@@ -52,6 +54,22 @@ public record ProvidersConfig(
    * @param tpm tokens per minute (양수)
    */
   public record ModelLimits(int rpm, long tpm) {}
+
+  /**
+   * HTTP 호출 공통 기본값 (provider executor가 HttpClient 구성 시 사용).
+   *
+   * @param connectTimeoutSec TCP connect 타임아웃 (초)
+   * @param requestTimeoutSec 1회 HTTP 요청 전체 타임아웃 (초). thinking 모델은 길게.
+   */
+  public record HttpDefaults(int connectTimeoutSec, int requestTimeoutSec) {
+
+    public static final HttpDefaults DEFAULT = new HttpDefaults(10, 180);
+
+    public HttpDefaults {
+      if (connectTimeoutSec < 1) throw new IllegalArgumentException("connectTimeoutSec must be >= 1");
+      if (requestTimeoutSec < 1) throw new IllegalArgumentException("requestTimeoutSec must be >= 1");
+    }
+  }
 
   /**
    * Transient 오류 재시도 정책.

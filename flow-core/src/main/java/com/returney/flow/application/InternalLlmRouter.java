@@ -109,6 +109,9 @@ public final class InternalLlmRouter implements LlmExecutor {
   public static InternalLlmRouter from(
       ProvidersConfig config, ApiKeySupplier keys, RateLimiter rateLimiter) {
     Map<String, LlmExecutor> executors = new HashMap<>();
+    ProvidersConfig.HttpDefaults defaults = config.defaults();
+    int connectSec = defaults.connectTimeoutSec();
+    int requestSec = defaults.requestTimeoutSec();
     for (var entry : config.providers().entrySet()) {
       String providerName = entry.getKey();
       ProvidersConfig.ProviderEntry p = entry.getValue();
@@ -117,18 +120,19 @@ public final class InternalLlmRouter implements LlmExecutor {
         // 키 없는 프로바이더는 등록하지 않음 — 해당 모델 호출 시 명확한 에러 발생
         continue;
       }
-      LlmExecutor exec = buildExecutor(p, key);
+      LlmExecutor exec = buildExecutor(p, key, connectSec, requestSec);
       if (exec != null) executors.put(providerName, exec);
     }
     return new InternalLlmRouter(config, executors, rateLimiter, Sleeper.real());
   }
 
-  private static LlmExecutor buildExecutor(ProvidersConfig.ProviderEntry p, String apiKey) {
+  private static LlmExecutor buildExecutor(
+      ProvidersConfig.ProviderEntry p, String apiKey, int connectSec, int requestSec) {
     return switch (p.type()) {
-      case "gemini" -> new GeminiLlmExecutor(GeminiConfig.of(apiKey));
-      case "anthropic" -> new ClaudeLlmExecutor(apiKey, p.baseUrl());
-      case "openai" -> new GptLlmExecutor(apiKey, p.baseUrl());
-      case "openai-reasoning" -> new ReasoningLlmExecutor(apiKey, p.baseUrl());
+      case "gemini" -> new GeminiLlmExecutor(GeminiConfig.of(apiKey), connectSec, requestSec);
+      case "anthropic" -> new ClaudeLlmExecutor(apiKey, p.baseUrl(), connectSec, requestSec);
+      case "openai" -> new GptLlmExecutor(apiKey, p.baseUrl(), connectSec, requestSec);
+      case "openai-reasoning" -> new ReasoningLlmExecutor(apiKey, p.baseUrl(), connectSec, requestSec);
       default -> null;
     };
   }
@@ -180,6 +184,9 @@ public final class InternalLlmRouter implements LlmExecutor {
    * <p>{@link LlmTransientException} / {@link LlmNetworkException}만 재시도 대상.
    * permanent 오류 (LlmClientErrorException 등)는 즉시 propagate.
    *
+   * <p>{@link LlmTransientException#retryAfterMs()}가 있으면 exp backoff와 max를 취해
+   * 서버 권고를 존중한다 (RFC 7231 Retry-After).
+   *
    * @param baseAttemptIndex onLlmCall 이벤트의 attemptIndex 시작값
    */
   private LlmRawResponse attemptWithRetries(
@@ -193,7 +200,7 @@ public final class InternalLlmRouter implements LlmExecutor {
         if (!isTransient(e)) throw e;             // permanent → propagate
         lastTransient = e;
         if (i + 1 < policy.maxAttempts()) {
-          sleepBackoff(policy, i);
+          sleepBackoff(policy, i, e);
         }
       }
     }
@@ -265,20 +272,38 @@ public final class InternalLlmRouter implements LlmExecutor {
     return e instanceof LlmTransientException || e instanceof LlmNetworkException;
   }
 
-  /** retryIdx (0=첫 재시도)마다 exponential backoff + jitter로 sleep. */
-  private void sleepBackoff(RetryPolicy policy, int retryIdx) throws LlmCallException {
-    double base = policy.initialDelayMs() * Math.pow(policy.backoffMultiplier(), retryIdx);
-    long delay = Math.min((long) base, policy.maxDelayMs());
-    if (policy.jitter() > 0.0) {
-      double factor = 1.0 + (ThreadLocalRandom.current().nextDouble() * 2 - 1) * policy.jitter();
-      delay = Math.max(0L, (long) (delay * factor));
+  /**
+   * retryIdx (0=첫 재시도)마다 exponential backoff + jitter로 sleep.
+   *
+   * <p>마지막 오류가 {@link LlmTransientException}이고 Retry-After 헤더가 있었으면
+   * {@code max(expBackoff, retryAfterMs)}를 적용한다 (서버 권고 존중).
+   * 단, jitter는 자체 backoff에만 적용 — Retry-After는 정확한 시간을 의도하므로 jitter 없음.
+   */
+  private void sleepBackoff(RetryPolicy policy, int retryIdx, LlmCallException lastError)
+      throws LlmCallException {
+    long expDelay = computeExpBackoff(policy, retryIdx);
+    long retryAfter = 0L;
+    if (lastError instanceof LlmTransientException tre) {
+      retryAfter = tre.retryAfterMs().orElse(0L);
     }
+    long delay = Math.max(expDelay, retryAfter);
     try {
       sleeper.sleep(delay);
     } catch (InterruptedException ie) {
       Thread.currentThread().interrupt();
       throw new LlmCallException("Retry backoff interrupted", ie);
     }
+  }
+
+  /** exp backoff + jitter 계산. Retry-After와 무관한 자체 정책 부분. */
+  private static long computeExpBackoff(RetryPolicy policy, int retryIdx) {
+    double base = policy.initialDelayMs() * Math.pow(policy.backoffMultiplier(), retryIdx);
+    long delay = Math.min((long) base, policy.maxDelayMs());
+    if (policy.jitter() > 0.0) {
+      double factor = 1.0 + (ThreadLocalRandom.current().nextDouble() * 2 - 1) * policy.jitter();
+      delay = Math.max(0L, (long) (delay * factor));
+    }
+    return delay;
   }
 
   /** ThreadLocal 컨텍스트를 호출당 1회 읽어 retry/fallback 동안 안정적으로 전달. */

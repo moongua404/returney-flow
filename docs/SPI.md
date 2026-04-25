@@ -211,6 +211,10 @@ retry:                       # transient 오류 재시도. 미명시 시 RetryPo
   jitter: 0.2                # 0~1 비율
 ```
 
+### Cancellation 정책
+
+returney-flow는 강제 cancellation을 제공하지 않는다. 진행 중 LLM 호출은 인터럽트되지 않고 자연스럽게 완료/실패되며, 결과는 항상 `onLlmCall` lifecycle 이벤트로 기록된다. 이유와 abandonment timeout 패턴은 [README.md](../README.md#cancellation--timeout-설계-결정) 참조.
+
 ### Retry / fallback 동작
 
 ```

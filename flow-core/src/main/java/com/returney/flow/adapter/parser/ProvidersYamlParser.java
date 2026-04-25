@@ -43,10 +43,11 @@ public final class ProvidersYamlParser {
     ParsedModels models = parseModels(root);
     Map<String, String> fallback = parseFallback(root);
     ProvidersConfig.RetryPolicy retry = parseRetry(root);
+    ProvidersConfig.HttpDefaults defaults = parseDefaults(root);
 
     return new ProvidersConfig(
         providers, routing, defaultModel,
-        models.capabilities, models.rateLimits, fallback, retry);
+        models.capabilities, models.rateLimits, fallback, retry, defaults);
   }
 
   // ── section parsers ──
@@ -141,6 +142,17 @@ public final class ProvidersYamlParser {
       if (entry.getValue() instanceof String fb) result.put(entry.getKey(), fb);
     }
     return result;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static ProvidersConfig.HttpDefaults parseDefaults(Map<String, Object> root) {
+    Object raw = root.get("defaults");
+    if (!(raw instanceof Map)) return ProvidersConfig.HttpDefaults.DEFAULT;
+    Map<String, Object> d = (Map<String, Object>) raw;
+    ProvidersConfig.HttpDefaults def = ProvidersConfig.HttpDefaults.DEFAULT;
+    int connect = d.get("connectTimeoutSec") instanceof Number n ? n.intValue() : def.connectTimeoutSec();
+    int request = d.get("requestTimeoutSec") instanceof Number n ? n.intValue() : def.requestTimeoutSec();
+    return new ProvidersConfig.HttpDefaults(connect, request);
   }
 
   @SuppressWarnings("unchecked")

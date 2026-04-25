@@ -320,6 +320,56 @@ class InternalLlmRouterTest {
   }
 
   @Test
+  void Retry_After가_있으면_exp_backoff보다_길게_대기() {
+    java.util.List<Long> sleepDurations = new java.util.ArrayList<>();
+    InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
+
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor flaky = req -> {
+      int n = calls.incrementAndGet();
+      if (n < 2) {
+        // 서버가 30초 대기를 권고
+        throw new LlmTransientException("anthropic", 429, "rate", 30_000L);
+      }
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(
+        CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
+
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    // exp backoff(500ms ±20%)보다 Retry-After(30s)가 더 큼 → 30s 적용
+    assertThat(sleepDurations).hasSize(1);
+    assertThat(sleepDurations.get(0)).isEqualTo(30_000L);
+  }
+
+  @Test
+  void Retry_After가_exp_backoff보다_짧으면_exp_backoff_사용() {
+    java.util.List<Long> sleepDurations = new java.util.ArrayList<>();
+    InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
+
+    java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
+    LlmExecutor flaky = req -> {
+      int n = calls.incrementAndGet();
+      if (n < 2) {
+        // 서버가 100ms만 권고 (exp backoff 500ms보다 짧음)
+        throw new LlmTransientException("anthropic", 429, "rate", 100L);
+      }
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(
+        CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
+
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    // exp backoff(500ms ±20%)가 더 큼 → exp backoff 사용 (jitter 범위)
+    assertThat(sleepDurations).hasSize(1);
+    assertThat(sleepDurations.get(0)).isBetween(400L, 600L);
+  }
+
+  @Test
   void backoff은_재시도_사이에만_호출됨() {
     java.util.List<Long> sleepDurations = new java.util.ArrayList<>();
     InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;

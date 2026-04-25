@@ -137,6 +137,36 @@ API 키는 환경변수(`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY
 
 ---
 
+## Cancellation / Timeout 설계 결정
+
+returney-flow는 **강제 cancellation을 제공하지 않는다**. 대신 두 종류의 timeout만 노출한다:
+
+| 종류 | 위치 | 동작 |
+|---|---|---|
+| **Per-request HTTP timeout** | `providers.yaml` `defaults.requestTimeoutSec` | 1회 HTTP 호출의 hard upper bound. 초과 시 `LlmNetworkException` → retry/fallback 진입 |
+| **Pipeline-level abandonment** | caller 측 `Future.orTimeout()` | caller가 응답 안 기다림. **백그라운드 호출은 계속 진행**되며 `onLlmCall`로 결과 기록 |
+
+### 왜 강제 cancel을 안 하나
+
+1. **이미 비용 발생**: LLM API 호출은 cancel해도 inference는 서버에서 끝까지 진행됨. 토큰 환불 없음.
+2. **디버깅 가치**: 진행 중 호출의 결과(latency, tokens, error)는 사후 분석에 가치 큼. cancel하면 영영 모름.
+3. **observability > forced cancel**: `ExecutionListener.onLlmCall`로 백그라운드 호출 결과가 항상 기록됨.
+
+따라서 "사용자 X 버튼 누름" 같은 시나리오는 caller 측에서 응답 무시하고 다음 화면으로 가면 충분. 백그라운드 호출은 자연스럽게 완료/실패 후 lifecycle hook으로 추적된다.
+
+```java
+pipeline.run(prereqs, sessionId, nodeIds, config, listener)
+    .orTimeout(10, TimeUnit.MINUTES)
+    .whenComplete((result, error) -> {
+        if (error instanceof TimeoutException) {
+            // caller는 즉시 다음 작업으로
+            // 백그라운드는 listener가 추적
+        }
+    });
+```
+
+---
+
 ## Extension Points (소비자 오버라이드 가능)
 
 `*PipelineBase`의 `protected` 메서드를 재정의하면 라이브러리 동작을 갈아끼울 수 있다.

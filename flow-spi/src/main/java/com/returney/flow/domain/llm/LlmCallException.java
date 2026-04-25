@@ -22,8 +22,17 @@ public class LlmCallException extends RuntimeException {
 
   /** HTTP 비성공 응답을 statusCode에 따라 적절한 서브타입으로 변환한다. */
   public static LlmCallException fromHttpError(String provider, int statusCode, String body) {
+    return fromHttpError(provider, statusCode, body, null);
+  }
+
+  /**
+   * HTTP 비성공 응답을 statusCode에 따라 적절한 서브타입으로 변환한다.
+   * Retry-After 헤더가 있으면 transient 오류에 동봉된다.
+   */
+  public static LlmCallException fromHttpError(
+      String provider, int statusCode, String body, Long retryAfterMs) {
     if (statusCode == 429 || statusCode == 500 || statusCode == 503) {
-      return new LlmTransientException(provider, statusCode, body);
+      return new LlmTransientException(provider, statusCode, body, retryAfterMs);
     }
     return new LlmClientErrorException(provider, statusCode, body);
   }

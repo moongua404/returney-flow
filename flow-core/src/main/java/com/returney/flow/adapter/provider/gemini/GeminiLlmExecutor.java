@@ -23,10 +23,16 @@ public class GeminiLlmExecutor implements LlmExecutor {
 
   private final GeminiConfig config;
   private final HttpClient httpClient;
+  private final int requestTimeoutSec;
 
   public GeminiLlmExecutor(GeminiConfig config) {
+    this(config, 10, 300);
+  }
+
+  public GeminiLlmExecutor(GeminiConfig config, int connectTimeoutSec, int requestTimeoutSec) {
     this.config = config;
-    this.httpClient = HttpUtil.newClient();
+    this.httpClient = HttpUtil.newClient(connectTimeoutSec);
+    this.requestTimeoutSec = requestTimeoutSec;
   }
 
   @Override
@@ -36,7 +42,9 @@ public class GeminiLlmExecutor implements LlmExecutor {
         ? request.model() : config.defaultModel();
     int estimatedTokens = estimateTokens(renderedPrompt);
     String url = config.baseUrl() + "/" + effectiveModel + ":generateContent?key=" + config.apiKey();
-    String responseBody = HttpUtil.postJsonOrThrow(httpClient, url, buildRequestBody(renderedPrompt, request.thinkingBudget()), HEADERS, PROVIDER);
+    String responseBody = HttpUtil.postJsonOrThrow(
+        httpClient, url, buildRequestBody(renderedPrompt, request.thinkingBudget()),
+        HEADERS, PROVIDER, requestTimeoutSec);
     String text = extractText(responseBody);
     return new LlmRawResponse(text, estimatedTokens, estimateTokens(text), 0, 0, 0);
   }

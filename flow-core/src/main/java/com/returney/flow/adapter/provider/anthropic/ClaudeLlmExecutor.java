@@ -27,15 +27,21 @@ public class ClaudeLlmExecutor implements LlmExecutor {
   private final String apiKey;
   private final String baseUrl;
   private final HttpClient httpClient;
+  private final int requestTimeoutSec;
 
   public ClaudeLlmExecutor(String apiKey) {
-    this(apiKey, "https://api.anthropic.com");
+    this(apiKey, "https://api.anthropic.com", 10, 300);
   }
 
   public ClaudeLlmExecutor(String apiKey, String baseUrl) {
+    this(apiKey, baseUrl, 10, 300);
+  }
+
+  public ClaudeLlmExecutor(String apiKey, String baseUrl, int connectTimeoutSec, int requestTimeoutSec) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
-    this.httpClient = HttpUtil.newClient();
+    this.httpClient = HttpUtil.newClient(connectTimeoutSec);
+    this.requestTimeoutSec = requestTimeoutSec;
   }
 
   @Override
@@ -49,7 +55,8 @@ public class ClaudeLlmExecutor implements LlmExecutor {
 
   private LlmRawResponse callApi(String body, String model) {
     Map<String, String> headers = Map.of("x-api-key", apiKey, "anthropic-version", API_VERSION);
-    String responseBody = HttpUtil.postJsonOrThrow(httpClient, baseUrl + "/v1/messages", body, headers, PROVIDER);
+    String responseBody = HttpUtil.postJsonOrThrow(
+        httpClient, baseUrl + "/v1/messages", body, headers, PROVIDER, requestTimeoutSec);
     return parseResponse(responseBody);
   }
 

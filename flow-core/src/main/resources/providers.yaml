@@ -39,6 +39,12 @@ routing:
 
 default: gemini-2.5-flash
 
+# HTTP 호출 공통 기본값. provider executor가 HttpClient/요청 timeout 구성 시 사용.
+# 미명시 시 HttpDefaults.DEFAULT (connect=10, request=180).
+defaults:
+  connectTimeoutSec: 10        # TCP connect 타임아웃
+  requestTimeoutSec: 180       # 1회 HTTP 요청 전체 타임아웃 (thinking 모델 고려 3분)
+
 # 모델별 attribute. 라우팅과 별개로, 모델 단위 quota/capability를 모은다.
 # - supportsThinking: false면 thinkingBudget이 0으로 강제됨
 # - thinkingMaxBudget: 양수면 budget이 이 값으로 cap

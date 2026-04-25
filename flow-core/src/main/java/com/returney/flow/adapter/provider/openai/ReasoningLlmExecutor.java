@@ -27,15 +27,21 @@ public class ReasoningLlmExecutor implements LlmExecutor {
   private final String apiKey;
   private final String baseUrl;
   private final HttpClient httpClient;
+  private final int requestTimeoutSec;
 
   public ReasoningLlmExecutor(String apiKey) {
-    this(apiKey, "https://api.openai.com");
+    this(apiKey, "https://api.openai.com", 10, 300);
   }
 
   public ReasoningLlmExecutor(String apiKey, String baseUrl) {
+    this(apiKey, baseUrl, 10, 300);
+  }
+
+  public ReasoningLlmExecutor(String apiKey, String baseUrl, int connectTimeoutSec, int requestTimeoutSec) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
-    this.httpClient = HttpUtil.newClient();
+    this.httpClient = HttpUtil.newClient(connectTimeoutSec);
+    this.requestTimeoutSec = requestTimeoutSec;
   }
 
   @Override
@@ -55,7 +61,8 @@ public class ReasoningLlmExecutor implements LlmExecutor {
 
   private LlmRawResponse callApi(String body, String model) {
     Map<String, String> headers = Map.of("Authorization", "Bearer " + apiKey);
-    String responseBody = HttpUtil.postJsonOrThrow(httpClient, baseUrl + "/v1/chat/completions", body, headers, PROVIDER);
+    String responseBody = HttpUtil.postJsonOrThrow(
+        httpClient, baseUrl + "/v1/chat/completions", body, headers, PROVIDER, requestTimeoutSec);
     return parseResponse(responseBody);
   }
 
