@@ -20,16 +20,6 @@ public class ExecutionContext {
   private final Map<String, String> prerequisites;
   private final long startTime;
 
-  public ExecutionContext(String sessionId) {
-    this.sessionId = sessionId;
-    this.prerequisites = Map.of();
-    this.startTime = System.currentTimeMillis();
-  }
-
-  public ExecutionContext(String sessionId, Map<String, NodeResult> seeds) {
-    this(sessionId, seeds, Map.of());
-  }
-
   public ExecutionContext(
       String sessionId, Map<String, NodeResult> seeds, Map<String, String> prerequisites) {
     this.sessionId = sessionId;

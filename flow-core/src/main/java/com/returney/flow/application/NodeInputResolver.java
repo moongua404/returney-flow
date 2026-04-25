@@ -1,7 +1,6 @@
 package com.returney.flow.application;
 
 import com.returney.flow.domain.definition.PipelineNode;
-import com.returney.flow.application.ExecutionContext;
 import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.port.NodeOutputExtractor;
 import java.util.HashMap;

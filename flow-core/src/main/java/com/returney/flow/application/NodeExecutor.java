@@ -1,13 +1,11 @@
 package com.returney.flow.application;
 
-import com.returney.flow.domain.execution.ExecutionConfig;
-import com.returney.flow.application.ExecutionContext;
-import com.returney.flow.domain.execution.NodeResult;
-import com.returney.flow.domain.execution.NodeStatus;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
+import com.returney.flow.domain.execution.ExecutionConfig;
+import com.returney.flow.domain.execution.NodeResult;
+import com.returney.flow.domain.execution.NodeStatus;
 import com.returney.flow.port.ExecutionListener;
-import com.returney.flow.domain.llm.LlmCallException;
 import com.returney.flow.port.ServerNodeExecutor;
 import java.util.List;
 import java.util.Map;
@@ -65,9 +63,6 @@ public class NodeExecutor {
       listener.onNodeCompleted(node.id(), result);
       return true;
 
-    } catch (LlmCallException e) {
-      recordFailure(node, start, e.getMessage(), ctx);
-      return false;
     } catch (Exception e) {
       recordFailure(node, start, e.getMessage(), ctx);
       return false;
