@@ -5,9 +5,10 @@ class FlowInterfaceGenerator {
     static void generate(File pipelineYaml, File outputDir, String pkg) {
         def pipeline = new Yaml().load(pipelineYaml.text) as Map
 
-        FlowValidator.validatePrerequisiteRefs(
-            pipeline.nodes as List<Map>,
-            (pipeline.prerequisites as List<String> ?: []) as Set)
+        // pipelineYaml과 같은 디렉터리의 prompts/ 를 자동 탐색.
+        // 없으면 prompts 관련 검증은 스킵.
+        File promptsDir = new File(pipelineYaml.parentFile, 'prompts')
+        FlowValidator.validateAll(pipeline, promptsDir.exists() ? promptsDir : null)
 
         def model  = FlowModel.from(pipeline, pkg)
         def outDir = new File(outputDir, pkg.replace('.', '/'))
