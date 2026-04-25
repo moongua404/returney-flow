@@ -2,6 +2,7 @@ package com.returney.flow.port;
 
 import com.returney.flow.domain.execution.PipelineResult;
 import com.returney.flow.domain.execution.NodeResult;
+import com.returney.flow.domain.llm.LlmCallEvent;
 
 /**
  * 플로우 실행 이벤트 리스너.
@@ -24,6 +25,14 @@ public interface ExecutionListener {
 
   /** 전체 플로우 실행이 완료되었을 때 호출된다. */
   void onFlowCompleted(PipelineResult result);
+
+  /**
+   * LLM 호출 1회가 끝났을 때 호출된다 (성공/실패 모두).
+   *
+   * <p>InternalLlmRouter가 발행. 소비자는 이 훅에서 LLM 호출 로깅, cost 계산,
+   * 메트릭 적재 등을 처리한다. 디폴트는 no-op.
+   */
+  default void onLlmCall(LlmCallEvent event) {}
 
   static ExecutionListener noop() {
     return new ExecutionListener() {

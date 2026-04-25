@@ -29,6 +29,14 @@ public interface LlmExecutor {
   default void setContext(String action, Map<String, String> variables) {}
 
   /**
+   * 다음 execute() 호출에 대한 라이프사이클 리스너를 설정한다.
+   * 호출자(LlmNodeRunner)가 노드 실행 전에 호출. 디폴트 no-op.
+   *
+   * <p>InternalLlmRouter가 onLlmCall 이벤트를 이 리스너로 발행한다.
+   */
+  default void setLifecycle(ExecutionListener listener) {}
+
+  /**
    * 구조화된 요청을 LLM에 전송한다.
    *
    * <p>단일 프롬프트, 대화 모드, 멀티모달 모두 이 메서드를 통해 처리한다.

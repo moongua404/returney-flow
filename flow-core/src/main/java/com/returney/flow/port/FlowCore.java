@@ -25,7 +25,7 @@ public final class FlowCore {
       Executor executor) {
 
     var resolver = new NodeInputResolver(extractor);
-    var runner   = new LlmNodeRunner(llmExecutor, promptRenderer, resolver, executor);
+    var runner   = new LlmNodeRunner(llmExecutor, promptRenderer, resolver, executor, listener);
     var node     = new NodeExecutor(runner, serverNodeExecutor, resolver, listener);
     return new PipelineExecutor(node, listener, executor);
   }

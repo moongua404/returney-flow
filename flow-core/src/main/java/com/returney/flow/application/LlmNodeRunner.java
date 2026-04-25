@@ -7,6 +7,7 @@ import com.returney.flow.domain.execution.ExecutionContext;
 import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.domain.llm.LlmCallException;
 import com.returney.flow.domain.llm.LlmRequest;
+import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.port.PromptRenderer;
 import java.util.ArrayList;
@@ -22,16 +23,19 @@ public class LlmNodeRunner {
   private final PromptRenderer promptRenderer;
   private final NodeInputResolver inputResolver;
   private final Executor executor;
+  private final ExecutionListener listener;
 
   public LlmNodeRunner(
       LlmExecutor llmExecutor,
       PromptRenderer promptRenderer,
       NodeInputResolver inputResolver,
-      Executor executor) {
+      Executor executor,
+      ExecutionListener listener) {
     this.llmExecutor = llmExecutor;
     this.promptRenderer = promptRenderer;
     this.inputResolver = inputResolver;
     this.executor = executor;
+    this.listener = listener;
   }
 
   String runLlm(
@@ -57,6 +61,7 @@ public class LlmNodeRunner {
       throws LlmCallException {
     String model = config.resolveModel(promptRenderer.getModel(node.action()));
     int budget = config.resolveThinkingBudget(promptRenderer.getThinkingBudget(node.action()));
+    llmExecutor.setLifecycle(listener);
     llmExecutor.setContext(node.action(), variables);
     return llmExecutor.execute(buildRequest(node, variables, model, budget)).text();
   }
