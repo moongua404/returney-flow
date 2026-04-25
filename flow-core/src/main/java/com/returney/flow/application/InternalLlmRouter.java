@@ -100,6 +100,27 @@ public final class InternalLlmRouter implements LlmExecutor {
     if (model == null || model.isBlank()) {
       model = config.defaultModel();
     }
+
+    String sessionId = currentSessionId.get() != null ? currentSessionId.get().toString() : null;
+    String action = currentAction.get();
+    ExecutionListener listener = currentListener.get();
+
+    LlmRequest first = applyCapability(ensureModel(request, model), model);
+    try {
+      return attempt(first, model, sessionId, action, listener, 0);
+    } catch (RuntimeException primaryError) {
+      String fallbackModel = config.fallbackFor(model);
+      if (fallbackModel == null || !isFallbackEligible(primaryError)) {
+        throw primaryError;
+      }
+      LlmRequest fbRequest = applyCapability(ensureModel(request, fallbackModel), fallbackModel);
+      return attempt(fbRequest, fallbackModel, sessionId, action, listener, 1);
+    }
+  }
+
+  private LlmRawResponse attempt(
+      LlmRequest request, String model, String sessionId, String action,
+      ExecutionListener listener, int attemptIndex) throws LlmCallException {
     String providerName = config.resolveProvider(model);
     if (providerName == null) {
       throw new LlmCallException(
@@ -112,24 +133,55 @@ public final class InternalLlmRouter implements LlmExecutor {
               + "(missing API key for model=" + model + ")");
     }
 
-    LlmRequest resolved = ensureModel(request, model);
-    String sessionId = currentSessionId.get() != null ? currentSessionId.get().toString() : null;
-    String action = currentAction.get();
-    ExecutionListener listener = currentListener.get();
-
     long start = System.currentTimeMillis();
     try {
-      LlmRawResponse response = exec.execute(resolved);
+      LlmRawResponse response = exec.execute(request);
       long latency = System.currentTimeMillis() - start;
       safelyEmit(listener,
-          LlmCallEvent.success(sessionId, action, resolved, response, model, latency, 0));
+          LlmCallEvent.success(sessionId, action, request, response, model, latency, attemptIndex));
       return response;
     } catch (RuntimeException e) {
       long latency = System.currentTimeMillis() - start;
       safelyEmit(listener,
-          LlmCallEvent.failure(sessionId, action, resolved, model, latency, e, 0));
+          LlmCallEvent.failure(sessionId, action, request, model, latency, e, attemptIndex));
       throw e;
     }
+  }
+
+  /**
+   * fallback 트리거 여부. 4xx/auth 같은 항구적 오류는 굳이 fallback 안 함.
+   * 보수적으로: LlmCallException 자체의 cause나 메시지로 transient 판단. 지금은 단순화 —
+   * 모든 RuntimeException이 fallback 대상. Phase 4b-3 또는 백엔드 sweep에서 정교화.
+   */
+  private static boolean isFallbackEligible(Throwable error) {
+    return true;
+  }
+
+  /**
+   * capability에 따라 thinkingBudget 보정. 미지원 모델은 0으로 강제, 지원 모델은
+   * maxBudget을 상한으로 cap.
+   */
+  private LlmRequest applyCapability(LlmRequest request, String model) {
+    ProvidersConfig.ModelCapability cap = config.capability(model);
+    int budget = request.thinkingBudget();
+    int adjusted;
+    if (!cap.supportsThinking()) {
+      adjusted = 0;
+    } else if (cap.thinkingMaxBudget() > 0 && budget > cap.thinkingMaxBudget()) {
+      adjusted = cap.thinkingMaxBudget();
+    } else {
+      adjusted = budget;
+    }
+    if (adjusted == budget) return request;
+    return new LlmRequest(
+        request.model(),
+        adjusted,
+        request.singlePrompt(),
+        request.systemPrompt(),
+        request.messages(),
+        request.cache(),
+        request.binaryContent(),
+        request.mimeType());
   }
 
   /** 리스너 콜백에서 던진 예외가 호출 결과를 가리지 않도록 격리. */

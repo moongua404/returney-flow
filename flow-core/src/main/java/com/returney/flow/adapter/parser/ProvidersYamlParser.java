@@ -76,6 +76,23 @@ public final class ProvidersYamlParser {
       throw new IllegalArgumentException("providers.yaml missing 'default' model");
     }
 
-    return new ProvidersConfig(providers, routing, defaultModel);
+    Map<String, ProvidersConfig.ModelCapability> capabilities = new LinkedHashMap<>();
+    Map<String, Object> rawCaps = (Map<String, Object>) root.getOrDefault("capabilities", Map.of());
+    for (var entry : rawCaps.entrySet()) {
+      Map<String, Object> c = (Map<String, Object>) entry.getValue();
+      boolean supportsThinking = Boolean.TRUE.equals(c.get("supportsThinking"));
+      int maxBudget =
+          c.get("thinkingMaxBudget") instanceof Number n ? n.intValue() : 0;
+      capabilities.put(
+          entry.getKey(), new ProvidersConfig.ModelCapability(supportsThinking, maxBudget));
+    }
+
+    Map<String, String> fallbackChain = new LinkedHashMap<>();
+    Map<String, Object> rawFb = (Map<String, Object>) root.getOrDefault("fallback", Map.of());
+    for (var entry : rawFb.entrySet()) {
+      if (entry.getValue() instanceof String fb) fallbackChain.put(entry.getKey(), fb);
+    }
+
+    return new ProvidersConfig(providers, routing, defaultModel, capabilities, fallbackChain);
   }
 }

@@ -34,8 +34,20 @@ class InternalLlmRouterTest {
   }
 
   @Test
-  void 라우팅_매치_없으면_명확한_에러() {
-    InternalLlmRouter router = InternalLlmRouter.from(CONFIG, fakeKeysFor("gemini"));
+  void 라우팅_매치_없으면_명확한_에러_fallback도_없을_때() {
+    // fallback 없는 미니 config — 미매칭 모델이 그대로 에러
+    ProvidersConfig configNoFb = ProvidersYamlParser.parse(
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        """);
+    InternalLlmRouter router = InternalLlmRouter.from(configNoFb, fakeKeysFor("gemini"));
 
     assertThatThrownBy(() ->
             router.execute(LlmRequest.single("x", "weird-model-xyz", 0)))
@@ -153,6 +165,119 @@ class InternalLlmRouterTest {
     LlmRawResponse result = router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0));
 
     assertThat(result).isSameAs(stubResponse);
+  }
+
+  @Test
+  void capability_미지원_모델은_thinking_budget이_0으로_강제() {
+    AtomicReference<LlmRequest> seen = new AtomicReference<>();
+    LlmExecutor stub = req -> {
+      seen.set(req);
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("openai", stub));
+
+    // gpt-4.1-mini는 capabilities에서 supportsThinking=false
+    router.execute(LlmRequest.single("hi", "gpt-4.1-mini", 5000));
+
+    assertThat(seen.get().thinkingBudget()).isEqualTo(0);
+  }
+
+  @Test
+  void capability_지원_모델은_maxBudget으로_cap() {
+    AtomicReference<LlmRequest> seen = new AtomicReference<>();
+    LlmExecutor stub = req -> {
+      seen.set(req);
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", stub));
+
+    // claude-haiku-4-5: thinkingMaxBudget=10000, 요청 50000 → 10000으로 cap
+    router.execute(LlmRequest.single("hi", "claude-haiku-4-5", 50000));
+
+    assertThat(seen.get().thinkingBudget()).isEqualTo(10000);
+  }
+
+  @Test
+  void fallback_체인_따라_재시도() {
+    AtomicReference<String> primaryCalled = new AtomicReference<>();
+    AtomicReference<String> fallbackCalled = new AtomicReference<>();
+
+    LlmExecutor flaky = req -> {
+      // 1차(claude-sonnet-4-6)는 실패, 2차(claude-haiku-4-5) 성공
+      if (req.model().equals("claude-sonnet-4-6")) {
+        primaryCalled.set(req.model());
+        throw new LlmCallException("primary down", null);
+      }
+      fallbackCalled.set(req.model());
+      return new LlmRawResponse("haiku-ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", flaky));
+
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    assertThat(primaryCalled.get()).isEqualTo("claude-sonnet-4-6");
+    assertThat(fallbackCalled.get()).isEqualTo("claude-haiku-4-5");
+    assertThat(result.text()).isEqualTo("haiku-ok");
+  }
+
+  @Test
+  void fallback_없는_모델은_원래_예외_그대로() {
+    LlmExecutor failing = req -> { throw new LlmCallException("permanent", null); };
+
+    // fallback 없는 미니 config (gemini만 routing, fallback 섹션 없음)
+    ProvidersConfig configNoFb = ProvidersYamlParser.parse(
+        """
+        providers:
+          gemini:
+            type: gemini
+            baseUrl: https://example.com
+        routing:
+          - prefix: "gemini-"
+            provider: gemini
+        default: gemini-2.5-flash
+        """);
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(configNoFb, Map.of("gemini", failing));
+
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0)))
+        .isInstanceOf(LlmCallException.class)
+        .hasMessageContaining("permanent");
+  }
+
+  @Test
+  void fallback_시도도_attemptIndex_이벤트로_식별() {
+    LlmExecutor flaky = req -> {
+      if (req.model().equals("claude-sonnet-4-6")) {
+        throw new LlmCallException("down", null);
+      }
+      return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
+    };
+
+    InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", flaky));
+
+    java.util.List<LlmCallEvent> events = new java.util.ArrayList<>();
+    ExecutionListener listener = new ExecutionListener() {
+      @Override public void onNodeStarted(String n, long t) {}
+      @Override public void onNodeCompleted(String n, NodeResult r) {}
+      @Override public void onNodeFailed(String n, String e) {}
+      @Override public void onNodeSkipped(String n) {}
+      @Override public void onFlowCompleted(PipelineResult r) {}
+      @Override public void onLlmCall(LlmCallEvent event) { events.add(event); }
+    };
+
+    router.setLifecycle(listener);
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+
+    assertThat(events).hasSize(2);
+    assertThat(events.get(0).attemptIndex()).isEqualTo(0);
+    assertThat(events.get(0).success()).isFalse();
+    assertThat(events.get(0).resolvedModel()).isEqualTo("claude-sonnet-4-6");
+    assertThat(events.get(1).attemptIndex()).isEqualTo(1);
+    assertThat(events.get(1).success()).isTrue();
+    assertThat(events.get(1).resolvedModel()).isEqualTo("claude-haiku-4-5");
   }
 
   /** 지정된 프로바이더 이름들에 대해서만 가짜 키를 반환. */
