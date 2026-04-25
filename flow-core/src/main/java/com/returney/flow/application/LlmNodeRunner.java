@@ -3,7 +3,7 @@ package com.returney.flow.application;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
 import com.returney.flow.domain.execution.ExecutionConfig;
-import com.returney.flow.domain.execution.ExecutionContext;
+import com.returney.flow.application.ExecutionContext;
 import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.domain.llm.LlmCallException;
 import com.returney.flow.domain.llm.LlmRequest;

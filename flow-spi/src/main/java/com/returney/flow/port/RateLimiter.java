@@ -4,7 +4,6 @@ package com.returney.flow.port;
  * Rate limiting 정책 추상화.
  *
  * <p>싱글톤으로 운용되며 모델별 슬라이딩 윈도우를 내부에서 관리한다.
- * 구현체는 {@link com.returney.flow.adapter.common.SlidingWindowRateLimiter}.
  *
  * <p>등록되지 않은 모델명을 전달하면 {@link IllegalArgumentException}이 발생한다.
  * sessionId는 현재 구현체에서 무시되며, 향후 퍼-세션 추적/로깅용으로 계약에 포함된다.

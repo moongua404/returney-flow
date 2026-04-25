@@ -1,7 +1,7 @@
 package com.returney.flow.application;
 
 import com.returney.flow.domain.execution.ExecutionConfig;
-import com.returney.flow.domain.execution.ExecutionContext;
+import com.returney.flow.application.ExecutionContext;
 import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.domain.execution.NodeStatus;
 import com.returney.flow.domain.definition.PipelineDefinition;

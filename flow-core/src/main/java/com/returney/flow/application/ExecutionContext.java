@@ -1,5 +1,7 @@
-package com.returney.flow.domain.execution;
+package com.returney.flow.application;
 
+import com.returney.flow.domain.execution.NodeResult;
+import com.returney.flow.domain.execution.NodeStatus;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
