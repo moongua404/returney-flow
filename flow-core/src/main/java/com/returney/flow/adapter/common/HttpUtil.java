@@ -17,9 +17,6 @@ import java.util.Optional;
 /** Java HttpClient 기반 공통 HTTP 유틸. */
 public final class HttpUtil {
 
-  private static final int MAX_RETRY = 2;
-  private static final long BASE_BACKOFF_MS = 5_000;
-  private static final long MAX_BACKOFF_MS = 15_000;
 
   private HttpUtil() {}
 
@@ -36,11 +33,10 @@ public final class HttpUtil {
   }
 
   /**
-   * JSON POST 요청을 실행하고 응답을 반환한다.
-   * 429 응답에 대해 최대 {@value MAX_RETRY}회 지수 백오프 재시도한다.
+   * JSON POST 요청을 실행하고 응답을 반환한다. 기본 request timeout 5분.
    *
-   * <p>InternalLlmRouter가 retry/Retry-After를 더 정교하게 처리하므로 이 내부 retry는
-   * 단기적 burst만 흡수. 기본 request timeout 5분.
+   * <p>재시도는 호출자({@code InternalLlmRouter})가 retry policy + Retry-After 헤더를
+   * 보고 처리한다. 본 메서드는 1회 호출만 수행 — 라우터의 retry와 이중 발생 방지.
    */
   public static HttpResponse<String> postJson(
       HttpClient client, String url, String body, Map<String, String> headers)
@@ -52,15 +48,7 @@ public final class HttpUtil {
   public static HttpResponse<String> postJson(
       HttpClient client, String url, String body, Map<String, String> headers, int requestTimeoutSec)
       throws IOException, InterruptedException {
-    HttpResponse<String> response = doPost(client, url, body, headers, requestTimeoutSec);
-    for (int attempt = 0; attempt < MAX_RETRY
-        && (response.statusCode() == 429 || response.statusCode() == 500 || response.statusCode() == 503);
-        attempt++) {
-      long sleepMs = Math.min(BASE_BACKOFF_MS * (1L << attempt), MAX_BACKOFF_MS);
-      Thread.sleep(sleepMs);
-      response = doPost(client, url, body, headers, requestTimeoutSec);
-    }
-    return response;
+    return doPost(client, url, body, headers, requestTimeoutSec);
   }
 
   private static HttpResponse<String> doPost(

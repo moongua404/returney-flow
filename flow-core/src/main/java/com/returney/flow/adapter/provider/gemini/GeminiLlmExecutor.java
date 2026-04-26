@@ -43,15 +43,29 @@ public class GeminiLlmExecutor implements LlmExecutor {
     String renderedPrompt = request.singlePrompt();
     String effectiveModel = (request.model() != null && !request.model().isEmpty())
         ? request.model() : config.defaultModel();
-    int estimatedTokens = estimateTokens(renderedPrompt);
     String url = config.baseUrl() + "/" + effectiveModel + ":generateContent?key=" + config.apiKey();
     String body = request.isMultimodal()
         ? buildMultimodalBody(renderedPrompt, request.binaryContent(), request.mimeType())
         : buildRequestBody(renderedPrompt, request.thinkingBudget());
     String responseBody = HttpUtil.postJsonOrThrow(
         httpClient, url, body, HEADERS, PROVIDER, requestTimeoutSec);
-    String text = extractText(responseBody);
-    return new LlmRawResponse(text, estimatedTokens, estimateTokens(text), 0, 0, 0);
+    Resp resp = parseResp(responseBody);
+    String text = extractText(resp);
+    // 실측 토큰을 응답의 usageMetadata에서 가져옴. 없을 때만 length 기반 추정 폴백.
+    UsageMetadata usage = resp != null ? resp.usageMetadata() : null;
+    int inputTokens = usage != null ? usage.promptTokenCount() : estimateTokens(renderedPrompt);
+    int candidateTokens = usage != null ? usage.candidatesTokenCount() : estimateTokens(text);
+    int thinkingTokens = usage != null ? usage.thoughtsTokenCount() : 0;
+    int outputTokens = Math.max(0, candidateTokens - thinkingTokens);
+    return new LlmRawResponse(text, inputTokens, outputTokens, thinkingTokens, 0, 0);
+  }
+
+  private Resp parseResp(String json) {
+    try {
+      return GSON.fromJson(json, Resp.class);
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   private String buildRequestBody(String prompt, int thinkingBudget) {
@@ -69,22 +83,19 @@ public class GeminiLlmExecutor implements LlmExecutor {
     return GSON.toJson(new Req(List.of(new Content(parts)), genConfig));
   }
 
-  private String extractText(String json) {
-    try {
-      Resp resp = GSON.fromJson(json, Resp.class);
-      if (resp.candidates() == null || resp.candidates().isEmpty()) return "";
-      ContentBody content = resp.candidates().get(0).content();
-      if (content == null || content.parts() == null || content.parts().isEmpty()) return "";
-      String lastText = "";
-      for (Part p : content.parts()) {
-        if (p.text() != null) lastText = p.text();
-      }
-      return lastText;
-    } catch (Exception e) {
-      return "";
+  private String extractText(Resp resp) {
+    if (resp == null || resp.candidates() == null || resp.candidates().isEmpty()) return "";
+    ContentBody content = resp.candidates().get(0).content();
+    if (content == null || content.parts() == null || content.parts().isEmpty()) return "";
+    String lastText = "";
+    for (Part p : content.parts()) {
+      if (p.text() != null) lastText = p.text();
     }
+    return lastText;
   }
 
+  // 폴백 추정 (usageMetadata 부재 시만 사용). InternalLlmRouter의 input 추정(length/4)과
+  // 동일한 휴리스틱은 아니지만, 실측 토큰이 우선이므로 차이 영향이 작음.
   private int estimateTokens(String text) {
     return text == null ? 0 : Math.max(1, text.length() / 3);
   }
@@ -105,10 +116,17 @@ public class GeminiLlmExecutor implements LlmExecutor {
 
   // ── Response DTOs ─────────────────────────────────────────────────────────
 
-  private record Resp(List<Candidate> candidates) {}
+  private record Resp(
+      List<Candidate> candidates,
+      @SerializedName("usageMetadata") UsageMetadata usageMetadata) {}
 
   private record Candidate(ContentBody content) {}
 
   private record ContentBody(List<Part> parts) {}
+
+  private record UsageMetadata(
+      @SerializedName("promptTokenCount") int promptTokenCount,
+      @SerializedName("candidatesTokenCount") int candidatesTokenCount,
+      @SerializedName("thoughtsTokenCount") int thoughtsTokenCount) {}
 
 }

@@ -1,5 +1,7 @@
 package com.returney.flow.port;
 
+import java.util.Locale;
+
 /**
  * 프로바이더 API 키 공급자.
  *
@@ -15,8 +17,13 @@ public interface ApiKeySupplier {
    */
   String get(String providerName);
 
-  /** {@code System.getenv("<NAME>_API_KEY")} 기반 기본 구현. */
+  /**
+   * {@code System.getenv("<NAME>_API_KEY")} 기반 기본 구현.
+   *
+   * <p>{@code toUpperCase()}는 기본 로케일 의존(Turkish locale에서 "i" → "İ"). 환경변수
+   * 키는 ASCII만 다루므로 {@link Locale#ROOT} 명시.
+   */
   static ApiKeySupplier fromEnv() {
-    return name -> System.getenv(name.toUpperCase().replace('-', '_') + "_API_KEY");
+    return name -> System.getenv(name.toUpperCase(Locale.ROOT).replace('-', '_') + "_API_KEY");
   }
 }

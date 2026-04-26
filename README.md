@@ -125,6 +125,10 @@ var result = pipeline.run(prereqs, sessionId, MyPipelineBase.DEFINITION.nodeIds(
     ExecutionConfig.defaults(), ExecutionListener.noop());
 ```
 
+위 `pipeline.run(...)`은 코드젠이 만든 `*PipelineBase`의 wrapper다. 내부적으로
+`PipelineRunner.run(definition, sessionId, nodeIds, config, seedResults, prerequisites)`
+6-인자 시그니처로 위임하지만 소비자는 wrapper로 호출하면 충분.
+
 API 키는 환경변수(`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY`)에서 자동 로드.
 
 ---
@@ -226,6 +230,39 @@ cd flow-codegen && ../gradlew compileGroovy
 - flow-codegen: snakeyaml 2.3 (Groovy DSL)
 
 flow-codegen은 Groovy로 작성됐다. 코드젠은 빌드타임 산출물이라 소비자 클래스패스에 노출되지 않으며, Gradle plugin 작성에 Groovy DSL이 자연스럽고 snakeyaml 동적 매핑과의 조합이 간결하다. flow-spi/flow-core는 100% Java.
+
+---
+
+## 동작 정책 노트
+
+### Fan-out 부분 실패는 전체 실패로 취급
+
+`scatter → llm → gather` 패턴에서 청크 1개가 실패하면 fan-out 노드 전체가
+실패한다 (`CompletableFuture.join`이 RuntimeException으로 propagate). LLM
+워크로드는 청크당 결과 일관성이 중요한 케이스가 많아 conservative default를 채택.
+
+부분 허용이 필요한 use case는 caller가 chunk별로 파이프라인을 직접 호출 +
+실패 흡수 로직을 구성한다.
+
+### Fallback 모델 진입 시 backoff index 리셋
+
+`InternalLlmRouter.attempt`는 primary 모델의 retry index가 끝나면 fallback
+모델로 진입하면서 backoff index를 0부터 다시 시작한다. primary와 fallback이
+서로 다른 capacity 모델이라는 가정 — primary의 누적 backoff를 fallback에
+그대로 적용하지 않는다. 의도적 결정.
+
+### ProGuard / R8 환경
+
+Gson 2.11이 record 직렬화를 지원하지만, ProGuard/R8이 component name을
+strip하면 `@SerializedName` 필드 매핑이 실패할 수 있다. 라이브러리를
+ProGuard 환경에서 사용 시 keep rule 추가 권장:
+
+```
+-keepclassmembers class com.returney.flow.** {
+    <init>(...);
+}
+-keepattributes Signature, RuntimeVisibleAnnotations
+```
 
 ---
 
