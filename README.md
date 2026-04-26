@@ -10,6 +10,26 @@ LLM 호출(라우팅·재시도·rate limit·fallback)은 라이브러리가 전
 
 ---
 
+## 흐름
+
+```
+*-flow.yaml ──┐
+              │  build time
+prompts/*.yaml┼──► flow-codegen ──► *PipelineBase.java (typed)
+              │                     *PipelineResult.java
+              │                     *PipelinePrerequisites.java
+              ▼
+        consumer ──► run() ──► flow-core (DAG executor)
+                                  │
+                                  ▼
+                          InternalLlmRouter
+                          ├─► ClaudeLlmExecutor
+                          ├─► GeminiLlmExecutor
+                          └─► GptLlmExecutor / ReasoningLlmExecutor
+```
+
+---
+
 ## 모듈
 
 ```
@@ -204,6 +224,8 @@ cd flow-codegen && ../gradlew compileGroovy
 - flow-spi: JDK 21 only (외부 의존 0)
 - flow-core: snakeyaml 2.3, gson 2.11
 - flow-codegen: snakeyaml 2.3 (Groovy DSL)
+
+flow-codegen은 Groovy로 작성됐다. 코드젠은 빌드타임 산출물이라 소비자 클래스패스에 노출되지 않으며, Gradle plugin 작성에 Groovy DSL이 자연스럽고 snakeyaml 동적 매핑과의 조합이 간결하다. flow-spi/flow-core는 100% Java.
 
 ---
 
