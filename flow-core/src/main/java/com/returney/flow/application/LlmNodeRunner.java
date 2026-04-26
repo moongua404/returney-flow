@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 
@@ -50,7 +51,7 @@ public class LlmNodeRunner {
       return executeFanOut(node, ctx, config, scatterUpstream);
     }
     Map<String, String> variables = inputResolver.resolve(node, ctx);
-    return callLlm(node, variables, config);
+    return callLlm(node, variables, config, parseSessionId(ctx));
   }
 
   String runTemplate(PipelineNode node, ExecutionContext ctx) {
@@ -60,11 +61,25 @@ public class LlmNodeRunner {
 
   // ── private ───────────────────────────────────────────────────────────────
 
+  /** ExecutionContext의 sessionId(String) → UUID. fan-out 자식 스레드에서 ThreadLocal 재설정에 필요. */
+  private static UUID parseSessionId(ExecutionContext ctx) {
+    String sid = ctx.sessionId();
+    if (sid == null || sid.isBlank()) return null;
+    try {
+      return UUID.fromString(sid);
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+  }
+
   private String callLlm(
-      PipelineNode node, Map<String, String> variables, ExecutionConfig config)
-      throws LlmCallException {
+      PipelineNode node, Map<String, String> variables, ExecutionConfig config,
+      UUID sessionId) throws LlmCallException {
     String model = config.resolveModel(promptRenderer.getModel(node.action()));
     int budget = config.resolveThinkingBudget(promptRenderer.getThinkingBudget(node.action()));
+    // fan-out 자식 스레드는 호출자 스레드의 ThreadLocal을 상속하지 않으므로
+    // 매 호출마다 sessionId/lifecycle/context를 명시적으로 설정한다.
+    if (sessionId != null) llmExecutor.setSessionId(sessionId);
     llmExecutor.setLifecycle(listener);
     llmExecutor.setContext(node.action(), variables);
     return llmExecutor.execute(buildRequest(node, variables, model, budget)).text();
@@ -118,6 +133,9 @@ public class LlmNodeRunner {
       PipelineNode node, ExecutionContext ctx, ExecutionConfig config, String scatterUpstreamId) {
     List<NodeResult> chunks = ctx.getScatterResults(scatterUpstreamId);
     List<CompletableFuture<NodeResult>> futures = new ArrayList<>();
+    // 자식 스레드(virtual thread)에 ThreadLocal이 상속되지 않으므로 sessionId를
+    // 캡처해서 callLlm으로 명시적 전달.
+    UUID sessionId = parseSessionId(ctx);
 
     for (NodeResult chunk : chunks) {
       futures.add(CompletableFuture.supplyAsync(() -> {
@@ -125,7 +143,7 @@ public class LlmNodeRunner {
           Map<String, String> variables = inputResolver.resolve(node, ctx);
           variables.put("chunk", chunk.output());
           long t = System.currentTimeMillis();
-          String output = callLlm(node, variables, config);
+          String output = callLlm(node, variables, config, sessionId);
           return new NodeResult(output, System.currentTimeMillis() - t, 0, 0);
         } catch (LlmCallException e) {
           throw new RuntimeException(e);

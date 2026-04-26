@@ -77,7 +77,8 @@ public final class SlidingWindowRateLimiter implements RateLimiter {
     private final ModelWindow window;
     private final long[] entry;        // 자기가 추가한 [timestamp, tokenCount] 핸들
     private final int estimated;
-    private boolean consumed = false;
+    private final java.util.concurrent.atomic.AtomicBoolean consumed =
+        new java.util.concurrent.atomic.AtomicBoolean(false);
 
     ReservationImpl(ModelWindow window, long[] entry, int estimated) {
       this.window = window;
@@ -87,8 +88,9 @@ public final class SlidingWindowRateLimiter implements RateLimiter {
 
     @Override
     public void confirm(int actualTokens) {
-      if (consumed) return;            // 일회성 보장 — 재호출은 무시
-      consumed = true;
+      // CAS로 일회성 보장 — 다른 스레드에서 재호출되거나 acquire 스레드 외부에서
+      // 호출돼도 race 없이 한 번만 처리.
+      if (!consumed.compareAndSet(false, true)) return;
       int actual = Math.max(0, actualTokens);
       synchronized (window.lock) {
         entry[1] = actual;
