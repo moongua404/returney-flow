@@ -30,7 +30,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.from(CONFIG, name -> null);
 
     assertThatThrownBy(() ->
-            router.execute(LlmRequest.single("hello", "claude-sonnet-4-6", 0)))
+            router.execute(LlmRequest.single("hello", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmCallException.class)
         .hasMessageContaining("missing API key");
   }
@@ -52,7 +52,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.from(configNoFb, fakeKeysFor("gemini"));
 
     assertThatThrownBy(() ->
-            router.execute(LlmRequest.single("x", "weird-model-xyz", 0)))
+            router.execute(LlmRequest.single("x", "weird-model-xyz", 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmCallException.class)
         .hasMessageContaining("No provider matches");
   }
@@ -67,7 +67,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter routerNoGemini = InternalLlmRouter.from(CONFIG, name -> null);
 
     assertThatThrownBy(() ->
-            routerNoGemini.execute(LlmRequest.single("hi", null, 0)))
+            routerNoGemini.execute(LlmRequest.single("hi", null, 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmCallException.class)
         .hasMessageContaining("Provider gemini")
         .hasMessageContaining("model=gemini-2.5-flash");
@@ -88,7 +88,7 @@ class InternalLlmRouterTest {
   @Test
   void onLlmCall_성공_이벤트_발행() {
     LlmRawResponse stubResponse = new LlmRawResponse("ok", 10, 5, 15, 0, 0);
-    LlmExecutor stub = req -> stubResponse;
+    LlmExecutor stub = (req, ctx) -> stubResponse;
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("gemini", stub));
 
@@ -102,11 +102,12 @@ class InternalLlmRouterTest {
       @Override public void onLlmCall(LlmCallEvent event) { captured.set(event); }
     };
 
-    router.setLifecycle(listener);
-    router.setSessionId(UUID.fromString("00000000-0000-0000-0000-000000000001"));
-    router.setContext("test_action", Map.of("k", "v"));
+    com.returney.flow.domain.llm.LlmCallContext callCtx =
+        new com.returney.flow.domain.llm.LlmCallContext(
+            UUID.fromString("00000000-0000-0000-0000-000000000001"),
+            "test_action", Map.of("k", "v"), listener);
 
-    LlmRawResponse result = router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0));
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0), callCtx);
 
     assertThat(result).isSameAs(stubResponse);
     assertThat(captured.get()).isNotNull();
@@ -121,7 +122,7 @@ class InternalLlmRouterTest {
 
   @Test
   void onLlmCall_실패_이벤트도_발행() {
-    LlmExecutor failing = req -> { throw new LlmCallException("boom", null); };
+    LlmExecutor failing = (req, ctx) -> { throw new LlmCallException("boom", null); };
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("gemini", failing));
 
@@ -135,9 +136,10 @@ class InternalLlmRouterTest {
       @Override public void onLlmCall(LlmCallEvent event) { captured.set(event); }
     };
 
-    router.setLifecycle(listener);
+    com.returney.flow.domain.llm.LlmCallContext callCtx2 =
+        new com.returney.flow.domain.llm.LlmCallContext(null, null, Map.of(), listener);
 
-    assertThatThrownBy(() -> router.execute(LlmRequest.single("x", "gemini-2.5-flash", 0)))
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("x", "gemini-2.5-flash", 0), callCtx2))
         .isInstanceOf(LlmCallException.class)
         .hasMessageContaining("boom");
 
@@ -150,7 +152,7 @@ class InternalLlmRouterTest {
   @Test
   void 리스너_예외는_LLM_결과를_가리지_않음() {
     LlmRawResponse stubResponse = new LlmRawResponse("ok", 1, 1, 2, 0, 0);
-    LlmExecutor stub = req -> stubResponse;
+    LlmExecutor stub = (req, ctx) -> stubResponse;
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("gemini", stub));
 
@@ -163,8 +165,9 @@ class InternalLlmRouterTest {
       @Override public void onLlmCall(LlmCallEvent event) { throw new RuntimeException("listener bug"); }
     };
 
-    router.setLifecycle(bogusListener);
-    LlmRawResponse result = router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0));
+    com.returney.flow.domain.llm.LlmCallContext callCtx3 =
+        new com.returney.flow.domain.llm.LlmCallContext(null, null, Map.of(), bogusListener);
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0), callCtx3);
 
     assertThat(result).isSameAs(stubResponse);
   }
@@ -172,7 +175,7 @@ class InternalLlmRouterTest {
   @Test
   void capability_미지원_모델은_thinking_budget이_0으로_강제() {
     AtomicReference<LlmRequest> seen = new AtomicReference<>();
-    LlmExecutor stub = req -> {
+    LlmExecutor stub = (req, ctx) -> {
       seen.set(req);
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
@@ -180,7 +183,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("openai", stub));
 
     // gpt-4.1-mini는 capabilities에서 supportsThinking=false
-    router.execute(LlmRequest.single("hi", "gpt-4.1-mini", 5000));
+    router.execute(LlmRequest.single("hi", "gpt-4.1-mini", 5000), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     assertThat(seen.get().thinkingBudget()).isEqualTo(0);
   }
@@ -188,7 +191,7 @@ class InternalLlmRouterTest {
   @Test
   void capability_지원_모델은_maxBudget으로_cap() {
     AtomicReference<LlmRequest> seen = new AtomicReference<>();
-    LlmExecutor stub = req -> {
+    LlmExecutor stub = (req, ctx) -> {
       seen.set(req);
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
@@ -196,7 +199,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", stub));
 
     // claude-haiku-4-5: thinkingMaxBudget=10000, 요청 50000 → 10000으로 cap
-    router.execute(LlmRequest.single("hi", "claude-haiku-4-5", 50000));
+    router.execute(LlmRequest.single("hi", "claude-haiku-4-5", 50000), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     assertThat(seen.get().thinkingBudget()).isEqualTo(10000);
   }
@@ -206,7 +209,7 @@ class InternalLlmRouterTest {
     AtomicReference<String> fallbackCalled = new AtomicReference<>();
     java.util.concurrent.atomic.AtomicInteger primaryAttempts = new java.util.concurrent.atomic.AtomicInteger(0);
 
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       if (req.model().equals("claude-sonnet-4-6")) {
         primaryAttempts.incrementAndGet();
         throw new LlmTransientException("anthropic", 503, "overloaded");
@@ -217,7 +220,7 @@ class InternalLlmRouterTest {
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", flaky));
 
-    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     // primary는 maxAttempts(3) 만큼 시도, 모두 실패 후 fallback
     assertThat(primaryAttempts.get()).isEqualTo(CONFIG.retryPolicy().maxAttempts());
@@ -228,14 +231,14 @@ class InternalLlmRouterTest {
   @Test
   void permanent_오류는_retry도_fallback도_안_함() {
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor failing = req -> {
+    LlmExecutor failing = (req, ctx) -> {
       calls.incrementAndGet();
       throw new LlmClientErrorException("anthropic", 401, "invalid api key");
     };
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", failing));
 
-    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0)))
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmClientErrorException.class)
         .hasMessageContaining("401");
 
@@ -246,7 +249,7 @@ class InternalLlmRouterTest {
   @Test
   void transient_retry로_복구되면_fallback_안_가() {
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       int n = calls.incrementAndGet();
       if (n < 3) throw new LlmTransientException("anthropic", 429, "rate limited");
       return new LlmRawResponse("recovered", 1, 1, 2, 0, 0);
@@ -254,7 +257,7 @@ class InternalLlmRouterTest {
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(CONFIG, Map.of("anthropic", flaky));
 
-    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    LlmRawResponse result = router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     assertThat(result.text()).isEqualTo("recovered");
     assertThat(calls.get()).isEqualTo(3);   // 3차 시도에서 성공
@@ -262,7 +265,7 @@ class InternalLlmRouterTest {
 
   @Test
   void fallback_없는_모델은_원래_예외_그대로() {
-    LlmExecutor failing = req -> { throw new LlmCallException("permanent", null); };
+    LlmExecutor failing = (req, ctx) -> { throw new LlmCallException("permanent", null); };
 
     // fallback 없는 미니 config (gemini만 routing, fallback 섹션 없음)
     ProvidersConfig configNoFb = ProvidersYamlParser.parse(
@@ -279,7 +282,7 @@ class InternalLlmRouterTest {
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(configNoFb, Map.of("gemini", failing));
 
-    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0)))
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "gemini-2.5-flash", 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmCallException.class)
         .hasMessageContaining("permanent");
   }
@@ -287,7 +290,7 @@ class InternalLlmRouterTest {
   @Test
   void maxAttempts_1이면_재시도_없이_즉시_throw_또는_fallback() {
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor failing = req -> {
+    LlmExecutor failing = (req, ctx) -> {
       calls.incrementAndGet();
       throw new LlmTransientException("anthropic", 503, "down");
     };
@@ -313,7 +316,7 @@ class InternalLlmRouterTest {
 
     InternalLlmRouter router = InternalLlmRouter.forTesting(configNoRetryNoFb, Map.of("anthropic", failing));
 
-    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0)))
+    assertThatThrownBy(() -> router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty()))
         .isInstanceOf(LlmTransientException.class);
 
     assertThat(calls.get()).isEqualTo(1);   // 단 1회
@@ -325,7 +328,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
 
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       int n = calls.incrementAndGet();
       if (n < 2) {
         // 서버가 30초 대기를 권고
@@ -337,7 +340,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.forTesting(
         CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
 
-    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     // exp backoff(500ms ±20%)보다 Retry-After(30s)가 더 큼 → 30s 적용
     assertThat(sleepDurations).hasSize(1);
@@ -350,7 +353,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
 
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       int n = calls.incrementAndGet();
       if (n < 2) {
         // 서버가 100ms만 권고 (exp backoff 500ms보다 짧음)
@@ -362,7 +365,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.forTesting(
         CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
 
-    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     // exp backoff(500ms ±20%)가 더 큼 → exp backoff 사용 (jitter 범위)
     assertThat(sleepDurations).hasSize(1);
@@ -375,7 +378,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter.Sleeper recordingSleeper = sleepDurations::add;
 
     java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger(0);
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       int n = calls.incrementAndGet();
       if (n < 3) throw new LlmTransientException("anthropic", 429, "rate");
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
@@ -384,7 +387,7 @@ class InternalLlmRouterTest {
     InternalLlmRouter router = InternalLlmRouter.forTesting(
         CONFIG, Map.of("anthropic", flaky), com.returney.flow.port.RateLimiter.unlimited(), recordingSleeper);
 
-    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), com.returney.flow.domain.llm.LlmCallContext.empty());
 
     // 3회 시도, 사이에 2회 sleep
     assertThat(calls.get()).isEqualTo(3);
@@ -396,7 +399,7 @@ class InternalLlmRouterTest {
 
   @Test
   void retry와_fallback이_각각_attemptIndex로_식별됨() {
-    LlmExecutor flaky = req -> {
+    LlmExecutor flaky = (req, ctx) -> {
       if (req.model().equals("claude-sonnet-4-6")) {
         throw new LlmTransientException("anthropic", 503, "down");
       }
@@ -415,8 +418,9 @@ class InternalLlmRouterTest {
       @Override public void onLlmCall(LlmCallEvent event) { events.add(event); }
     };
 
-    router.setLifecycle(listener);
-    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0));
+    com.returney.flow.domain.llm.LlmCallContext callCtxF =
+        new com.returney.flow.domain.llm.LlmCallContext(null, null, Map.of(), listener);
+    router.execute(LlmRequest.single("hi", "claude-sonnet-4-6", 0), callCtxF);
 
     int max = CONFIG.retryPolicy().maxAttempts();
     // primary가 max회 실패 + fallback 1회 성공 = max+1 events

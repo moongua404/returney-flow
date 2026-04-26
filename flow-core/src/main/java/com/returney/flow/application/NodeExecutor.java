@@ -1,5 +1,6 @@
 package com.returney.flow.application;
 
+import com.returney.flow.domain.definition.NodeType;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
 import com.returney.flow.domain.execution.ExecutionConfig;
@@ -47,16 +48,20 @@ public class NodeExecutor {
 
     long start = System.currentTimeMillis();
     try {
-      String output = switch (node.type()) {
-        case LLM      -> llmNodeRunner.runLlm(node, pipelineDef, ctx, config);
-        case TEMPLATE -> llmNodeRunner.runTemplate(node, ctx);
-        case SCATTER  -> executeScatter(node, ctx);
-        case GATHER   -> executeGather(node, pipelineDef, ctx);
-        case TRANSFORM -> executeTransform(node, ctx);
-      };
-
-      long latencyMs = System.currentTimeMillis() - start;
-      NodeResult result = new NodeResult(output, latencyMs, 0, 0);
+      NodeResult result;
+      if (node.type() == NodeType.LLM) {
+        // LLM 노드는 토큰 정보를 NodeResult에 채워 반환.
+        result = llmNodeRunner.runLlm(node, pipelineDef, ctx, config);
+      } else {
+        String output = switch (node.type()) {
+          case TEMPLATE -> llmNodeRunner.runTemplate(node, ctx);
+          case SCATTER  -> executeScatter(node, ctx);
+          case GATHER   -> executeGather(node, pipelineDef, ctx);
+          case TRANSFORM -> executeTransform(node, ctx);
+          default -> throw new IllegalStateException("unhandled node type: " + node.type());
+        };
+        result = new NodeResult(output, System.currentTimeMillis() - start, 0, 0);
+      }
       ctx.setResult(node.id(), result);
 
       ctx.setStatus(node.id(), NodeStatus.COMPLETED);

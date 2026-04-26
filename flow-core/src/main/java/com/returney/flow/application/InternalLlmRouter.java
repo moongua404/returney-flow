@@ -9,6 +9,7 @@ import com.returney.flow.adapter.provider.gemini.GeminiConfig;
 import com.returney.flow.adapter.provider.gemini.GeminiLlmExecutor;
 import com.returney.flow.adapter.provider.openai.GptLlmExecutor;
 import com.returney.flow.adapter.provider.openai.ReasoningLlmExecutor;
+import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmCallEvent;
 import com.returney.flow.domain.llm.LlmCallException;
 import com.returney.flow.domain.llm.LlmNetworkException;
@@ -21,7 +22,6 @@ import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.port.RateLimiter;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -55,12 +55,6 @@ public final class InternalLlmRouter implements LlmExecutor {
   private final Map<String, LlmExecutor> executors;
   private final RateLimiter rateLimiter;
   private final Sleeper sleeper;
-
-  // 컨텍스트는 호출 스레드별로 보관. virtual thread fan-out에선 호출 직전 setX가 매번 일어남.
-  private final ThreadLocal<UUID> currentSessionId = new ThreadLocal<>();
-  private final ThreadLocal<String> currentAction = new ThreadLocal<>();
-  private final ThreadLocal<ExecutionListener> currentListener =
-      ThreadLocal.withInitial(ExecutionListener::noop);
 
   private InternalLlmRouter(
       ProvidersConfig config,
@@ -138,31 +132,16 @@ public final class InternalLlmRouter implements LlmExecutor {
   }
 
   @Override
-  public void setSessionId(UUID sessionId) {
-    currentSessionId.set(sessionId);
-  }
-
-  @Override
-  public void setContext(String action, Map<String, String> variables) {
-    currentAction.set(action);
-  }
-
-  @Override
-  public void setLifecycle(ExecutionListener listener) {
-    currentListener.set(listener != null ? listener : ExecutionListener.noop());
-  }
-
-  @Override
-  public LlmRawResponse execute(LlmRequest request) throws LlmCallException {
+  public LlmRawResponse execute(LlmRequest request, LlmCallContext callContext) throws LlmCallException {
     String model = request.model();
     if (model == null || model.isBlank()) {
       model = config.defaultModel();
     }
 
     Ctx ctx = new Ctx(
-        currentSessionId.get() != null ? currentSessionId.get().toString() : null,
-        currentAction.get(),
-        currentListener.get());
+        callContext.sessionId() != null ? callContext.sessionId().toString() : null,
+        callContext.action(),
+        callContext.listener());
 
     LlmRequest first = applyCapability(ensureModel(request, model), model);
     try {
@@ -173,7 +152,9 @@ public final class InternalLlmRouter implements LlmExecutor {
         throw primaryError;
       }
       LlmRequest fbRequest = applyCapability(ensureModel(request, fallbackModel), fallbackModel);
-      // primary가 N회 시도 후 fallback 시작 — attemptIndex offset 적용
+      // primary가 N회 시도 후 fallback 시작 — attemptIndex offset 적용.
+      // 의도적으로 fallback의 backoff index도 0부터 시작(서로 다른 capacity의
+      // 모델로 전환했으므로 primary의 누적 backoff와 분리).
       return attemptWithRetries(fbRequest, fallbackModel, ctx, config.retryPolicy().maxAttempts());
     }
   }
@@ -232,7 +213,8 @@ public final class InternalLlmRouter implements LlmExecutor {
 
     long start = System.currentTimeMillis();
     try {
-      LlmRawResponse response = exec.execute(request);
+      // 라우터가 lifecycle/listener를 직접 다루므로 provider에는 빈 컨텍스트 전달.
+      LlmRawResponse response = exec.execute(request, LlmCallContext.empty());
       long latency = System.currentTimeMillis() - start;
       reservation.confirm(response.totalTokens());
       safelyEmit(ctx.listener,

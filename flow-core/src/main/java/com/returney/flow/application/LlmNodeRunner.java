@@ -6,7 +6,9 @@ import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
 import com.returney.flow.domain.execution.ExecutionConfig;
 import com.returney.flow.domain.execution.NodeResult;
+import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmCallException;
+import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
@@ -43,15 +45,23 @@ public class LlmNodeRunner {
     this.listener = listener;
   }
 
-  String runLlm(
+  /**
+   * LLM 노드 실행. fan-out 노드의 경우 NodeResult.output()은 더미("[fan-out:N]")이고
+   * 토큰은 0 — 실제 응답은 ctx.scatterResults에 자식 NodeResult별로 적재된다.
+   */
+  NodeResult runLlm(
       PipelineNode node, PipelineDefinition pipelineDef,
       ExecutionContext ctx, ExecutionConfig config) throws LlmCallException {
     String scatterUpstream = findScatterUpstream(node, pipelineDef, ctx);
     if (scatterUpstream != null) {
-      return executeFanOut(node, ctx, config, scatterUpstream);
+      String marker = executeFanOut(node, ctx, config, scatterUpstream);
+      return new NodeResult(marker, 0, 0, 0);
     }
     Map<String, String> variables = inputResolver.resolve(node, ctx);
-    return callLlm(node, variables, config, parseSessionId(ctx));
+    long start = System.currentTimeMillis();
+    LlmRawResponse resp = callLlm(node, variables, config, parseSessionId(ctx));
+    long latency = System.currentTimeMillis() - start;
+    return new NodeResult(resp.text(), latency, resp.inputTokens(), resp.outputTokens());
   }
 
   String runTemplate(PipelineNode node, ExecutionContext ctx) {
@@ -72,17 +82,13 @@ public class LlmNodeRunner {
     }
   }
 
-  private String callLlm(
+  private LlmRawResponse callLlm(
       PipelineNode node, Map<String, String> variables, ExecutionConfig config,
       UUID sessionId) throws LlmCallException {
     String model = config.resolveModel(promptRenderer.getModel(node.action()));
     int budget = config.resolveThinkingBudget(promptRenderer.getThinkingBudget(node.action()));
-    // fan-out 자식 스레드는 호출자 스레드의 ThreadLocal을 상속하지 않으므로
-    // 매 호출마다 sessionId/lifecycle/context를 명시적으로 설정한다.
-    if (sessionId != null) llmExecutor.setSessionId(sessionId);
-    llmExecutor.setLifecycle(listener);
-    llmExecutor.setContext(node.action(), variables);
-    return llmExecutor.execute(buildRequest(node, variables, model, budget)).text();
+    LlmCallContext callContext = new LlmCallContext(sessionId, node.action(), variables, listener);
+    return llmExecutor.execute(buildRequest(node, variables, model, budget), callContext);
   }
 
   private LlmRequest buildRequest(
@@ -143,8 +149,9 @@ public class LlmNodeRunner {
           Map<String, String> variables = inputResolver.resolve(node, ctx);
           variables.put("chunk", chunk.output());
           long t = System.currentTimeMillis();
-          String output = callLlm(node, variables, config, sessionId);
-          return new NodeResult(output, System.currentTimeMillis() - t, 0, 0);
+          LlmRawResponse resp = callLlm(node, variables, config, sessionId);
+          return new NodeResult(
+              resp.text(), System.currentTimeMillis() - t, resp.inputTokens(), resp.outputTokens());
         } catch (LlmCallException e) {
           throw new RuntimeException(e);
         }

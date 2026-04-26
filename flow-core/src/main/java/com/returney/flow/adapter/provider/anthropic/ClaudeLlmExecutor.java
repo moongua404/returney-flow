@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.annotations.SerializedName;
 import com.returney.flow.adapter.common.HttpUtil;
 import com.returney.flow.port.LlmExecutor;
+import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import java.net.http.HttpClient;
@@ -45,7 +46,7 @@ public class ClaudeLlmExecutor implements LlmExecutor {
   }
 
   @Override
-  public LlmRawResponse execute(LlmRequest request) {
+  public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
     if (request.isConversation()) {
       boolean enableCache = request.cache() != null && request.cache().enabled();
       return callApi(buildConversationBody(request.systemPrompt(), request.messages(), request.model(), enableCache), request.model());

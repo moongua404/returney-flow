@@ -57,7 +57,7 @@ class PipelineExecutorIntegrationTest {
 
   /** 모든 호출에 동일 응답을 반환하는 stub. */
   private static LlmExecutor fixedResponse(String text) {
-    return req -> new LlmRawResponse(text, 1, 1, 2, 0, 0);
+    return (req, ctx) -> new LlmRawResponse(text, 1, 1, 2, 0, 0);
   }
 
   /** node.action을 그대로 반환하는 단순 PromptRenderer. */
@@ -160,14 +160,14 @@ class PipelineExecutorIntegrationTest {
     //   c
     // a→b→c branch fails at b. d→e branch unaffected.
     Map<String, LlmExecutor> perNode = new ConcurrentHashMap<>();
-    LlmExecutor selector = req -> {
+    LlmExecutor selector = (req, ctx) -> {
       // action == nodeId in this test
       String action = ECHO_RENDERER.render(req.singlePrompt(), Map.of());  // not used here
       // Just route by prompt content. ECHO_RENDERER.render returns action which equals node id.
       return new LlmRawResponse(req.singlePrompt(), 1, 1, 2, 0, 0);
     };
     // Simpler: throw on "b", succeed elsewhere
-    LlmExecutor failingOnB = req -> {
+    LlmExecutor failingOnB = (req, ctx) -> {
       if ("b".equals(req.singlePrompt())) throw new LlmCallException("intentional");
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
@@ -224,7 +224,7 @@ class PipelineExecutorIntegrationTest {
     };
 
     java.util.concurrent.atomic.AtomicInteger llmCallCount = new java.util.concurrent.atomic.AtomicInteger();
-    LlmExecutor llmReflectingChunk = req -> {
+    LlmExecutor llmReflectingChunk = (req, ctx) -> {
       llmCallCount.incrementAndGet();
       return new LlmRawResponse("processed:" + req.singlePrompt(), 1, 1, 2, 0, 0);
     };
@@ -284,7 +284,7 @@ class PipelineExecutorIntegrationTest {
 
     // LLM에 들어간 변수를 캡처
     java.util.concurrent.atomic.AtomicReference<String> seenPrompt = new java.util.concurrent.atomic.AtomicReference<>();
-    LlmExecutor capturing = req -> {
+    LlmExecutor capturing = (req, ctx) -> {
       seenPrompt.set(req.singlePrompt());
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
@@ -328,7 +328,7 @@ class PipelineExecutorIntegrationTest {
 
   @Test
   void critical_node_failure_records_status_FAILED() {
-    LlmExecutor alwaysFailing = req -> { throw new LlmCallException("nope"); };
+    LlmExecutor alwaysFailing = (req, ctx) -> { throw new LlmCallException("nope"); };
 
     var def = definition(
         List.of(llmNode("a", Map.of())),

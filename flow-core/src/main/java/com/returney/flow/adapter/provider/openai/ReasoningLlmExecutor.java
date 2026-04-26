@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.annotations.SerializedName;
 import com.returney.flow.adapter.common.HttpUtil;
 import com.returney.flow.port.LlmExecutor;
+import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import java.net.http.HttpClient;
@@ -45,7 +46,7 @@ public class ReasoningLlmExecutor implements LlmExecutor {
   }
 
   @Override
-  public LlmRawResponse execute(LlmRequest request) {
+  public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
     String prompt;
     if (request.isConversation()) {
       // reasoning 모델은 system 미지원 — system + messages를 user 메시지로 병합

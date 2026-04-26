@@ -97,11 +97,10 @@ ${cases}
 package ${m.pkg};
 
 import com.returney.flow.domain.llm.LlmCallException;
+import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import com.returney.flow.port.LlmExecutor;
-import java.util.Map;
-import java.util.UUID;
 
 /**
  * ${m.flowName} 파이프라인 LLM 미들웨어. Gradle 코드젠으로 생성됨 — 직접 수정 금지.
@@ -117,22 +116,12 @@ public class ${m.flowName}LlmMiddleware implements LlmExecutor {
     }
 
     @Override
-    public LlmRawResponse execute(LlmRequest request) throws LlmCallException {
-        return delegate.execute(beforeExecute(request));
+    public LlmRawResponse execute(LlmRequest request, LlmCallContext context) throws LlmCallException {
+        return delegate.execute(beforeExecute(request), context);
     }
 
     protected LlmRequest beforeExecute(LlmRequest request) {
         return request;
-    }
-
-    @Override
-    public void setSessionId(UUID sessionId) {
-        delegate.setSessionId(sessionId);
-    }
-
-    @Override
-    public void setContext(String action, Map<String, String> variables) {
-        delegate.setContext(action, variables);
     }
 }
 """
@@ -228,7 +217,7 @@ public abstract class ${m.flowName}Base {"""
         ExecutionListener listener) {
 
         LlmExecutor middleware = createLlmMiddleware(llmExecutor());
-        middleware.setSessionId(sessionId);
+        // sessionId는 LlmNodeRunner가 ExecutionContext에서 읽어 매 호출 LlmCallContext로 전달.
         ServerNodeExecutor serverNodes = buildServerNodeExecutor();
         ExecutionListener el = listener != null ? listener : ExecutionListener.noop();
 
