@@ -1,5 +1,7 @@
 package com.returney.flow.application;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
 import com.returney.flow.domain.execution.ExecutionConfig;
@@ -10,6 +12,7 @@ import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.port.PromptRenderer;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -17,6 +20,8 @@ import java.util.concurrent.Executor;
 
 /** LLM 노드 및 TEMPLATE 노드 실행. fan-out(scatter 병렬화) 포함. */
 public class LlmNodeRunner {
+
+  private static final Gson GSON = new Gson();
 
   private final LlmExecutor llmExecutor;
   private final PromptRenderer promptRenderer;
@@ -67,15 +72,38 @@ public class LlmNodeRunner {
 
   private LlmRequest buildRequest(
       PipelineNode node, Map<String, String> variables, String model, int budget) {
+    String binaryB64 = variables.get("binaryContentBase64");
+    String mimeType = variables.get("mimeType");
+    if (binaryB64 != null && !binaryB64.isEmpty()
+        && mimeType != null && !mimeType.isEmpty()) {
+      String prompt = promptRenderer.render(node.action(), variables);
+      return LlmRequest.multimodal(
+          prompt, Base64.getDecoder().decode(binaryB64), mimeType, model, budget);
+    }
     String systemPrompt = promptRenderer.renderSystemPrompt(node.action(), variables);
     if (systemPrompt != null) {
-      String userPrompt = promptRenderer.renderUserPrompt(node.action(), variables);
+      List<LlmRequest.Message> messages = parseMessagesOrSynthesize(node, variables);
       return LlmRequest.conversation(
-          systemPrompt,
-          List.of(new LlmRequest.Message("user", userPrompt)),
-          model, budget, new LlmRequest.CacheConfig(true));
+          systemPrompt, messages, model, budget, new LlmRequest.CacheConfig(true));
     }
     return LlmRequest.single(promptRenderer.render(node.action(), variables), model, budget);
+  }
+
+  private List<LlmRequest.Message> parseMessagesOrSynthesize(
+      PipelineNode node, Map<String, String> variables) {
+    String messagesJson = variables.get("conversationMessagesJson");
+    if (messagesJson != null && !messagesJson.isEmpty()) {
+      List<Map<String, String>> raw = GSON.fromJson(
+          messagesJson, new TypeToken<List<Map<String, String>>>() {}.getType());
+      List<LlmRequest.Message> messages = new ArrayList<>(raw.size());
+      for (Map<String, String> m : raw) {
+        messages.add(new LlmRequest.Message(
+            m.getOrDefault("role", "user"), m.getOrDefault("content", "")));
+      }
+      return messages;
+    }
+    String userPrompt = promptRenderer.renderUserPrompt(node.action(), variables);
+    return List.of(new LlmRequest.Message("user", userPrompt));
   }
 
   private String findScatterUpstream(

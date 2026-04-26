@@ -1,11 +1,13 @@
 package com.returney.flow.adapter.provider.gemini;
 
 import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
 import com.returney.flow.adapter.common.HttpUtil;
 import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import java.net.http.HttpClient;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -42,9 +44,11 @@ public class GeminiLlmExecutor implements LlmExecutor {
         ? request.model() : config.defaultModel();
     int estimatedTokens = estimateTokens(renderedPrompt);
     String url = config.baseUrl() + "/" + effectiveModel + ":generateContent?key=" + config.apiKey();
+    String body = request.isMultimodal()
+        ? buildMultimodalBody(renderedPrompt, request.binaryContent(), request.mimeType())
+        : buildRequestBody(renderedPrompt, request.thinkingBudget());
     String responseBody = HttpUtil.postJsonOrThrow(
-        httpClient, url, buildRequestBody(renderedPrompt, request.thinkingBudget()),
-        HEADERS, PROVIDER, requestTimeoutSec);
+        httpClient, url, body, HEADERS, PROVIDER, requestTimeoutSec);
     String text = extractText(responseBody);
     return new LlmRawResponse(text, estimatedTokens, estimateTokens(text), 0, 0, 0);
   }
@@ -52,7 +56,16 @@ public class GeminiLlmExecutor implements LlmExecutor {
   private String buildRequestBody(String prompt, int thinkingBudget) {
     ThinkingConfig thinkingConfig = thinkingBudget > 0 ? new ThinkingConfig(thinkingBudget) : null;
     GenerationConfig genConfig = new GenerationConfig(config.temperature(), config.maxOutputTokens(), thinkingConfig);
-    return GSON.toJson(new Req(List.of(new Content(List.of(new Part(prompt)))), genConfig));
+    return GSON.toJson(new Req(List.of(new Content(List.of(new Part(prompt, null)))), genConfig));
+  }
+
+  private String buildMultimodalBody(String textPrompt, byte[] binary, String mimeType) {
+    String base64 = Base64.getEncoder().encodeToString(binary);
+    GenerationConfig genConfig = new GenerationConfig(0.1, config.maxOutputTokens(), null);
+    List<Part> parts = List.of(
+        new Part(textPrompt, null),
+        new Part(null, new InlineData(mimeType, base64)));
+    return GSON.toJson(new Req(List.of(new Content(parts)), genConfig));
   }
 
   private String extractText(String json) {
@@ -81,7 +94,9 @@ public class GeminiLlmExecutor implements LlmExecutor {
 
   private record Content(List<Part> parts) {}
 
-  private record Part(String text) {}
+  private record Part(String text, @SerializedName("inline_data") InlineData inlineData) {}
+
+  private record InlineData(@SerializedName("mime_type") String mimeType, String data) {}
 
   private record GenerationConfig(double temperature, int maxOutputTokens, ThinkingConfig thinkingConfig) {}
 
