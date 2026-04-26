@@ -171,6 +171,10 @@ class FlowValidator {
             Set<String> usedVars = collectVariables(promptYaml)
             Set<String> inputKeys = ((node.inputs as Map)?.keySet() ?: []).collect { it as String } as Set
 
+            // fan-out: _scatter upstream이 있으면 LlmNodeRunner가 'chunk' 변수를 자동 주입.
+            boolean hasScatter = (node.inputs as Map)?.keySet()?.any { (it as String).startsWith('_') }
+            if (hasScatter) inputKeys = (inputKeys + 'chunk') as Set
+
             usedVars.each { var ->
                 if (!inputKeys.contains(var)) {
                     issues << ("Node '${node.id}' prompt '${action}' references " +

@@ -4,10 +4,14 @@ class FlowInterfaceGenerator {
 
     /** 단일 yaml 산출물 생성. 클래스패스의 yamlResourcePath는 yaml 파일명으로 자동 결정. */
     static void generate(File pipelineYaml, File outputDir, String pkg) {
+        generate(pipelineYaml, outputDir, pkg, false)
+    }
+
+    static void generate(File pipelineYaml, File outputDir, String pkg, boolean strictPrompts) {
         def pipeline = new Yaml().load(pipelineYaml.text) as Map
 
         File promptsDir = new File(pipelineYaml.parentFile, 'prompts')
-        FlowValidator.validateAll(pipeline, promptsDir.exists() ? promptsDir : null)
+        FlowValidator.validateAll(pipeline, promptsDir.exists() ? promptsDir : null, strictPrompts)
 
         def model  = FlowModel.from(pipeline, pkg, pipelineYaml.name)
         def outDir = new File(outputDir, pkg.replace('.', '/'))
@@ -31,6 +35,10 @@ class FlowInterfaceGenerator {
      * (생성된 *Base 코드가 {@code parseFromClasspath(yamlName)}로 로드).
      */
     static void generateAll(File yamlsDir, File outputDir, String pkg) {
+        generateAll(yamlsDir, outputDir, pkg, false)
+    }
+
+    static void generateAll(File yamlsDir, File outputDir, String pkg, boolean strictPrompts) {
         if (!yamlsDir.exists() || !yamlsDir.isDirectory()) {
             throw new IllegalArgumentException("yamlsDir does not exist: ${yamlsDir}")
         }
@@ -40,7 +48,7 @@ class FlowInterfaceGenerator {
                 "No *-flow.yaml files found in ${yamlsDir} (need at least one pipeline)")
         }
         for (File yaml : yamls) {
-            generate(yaml, outputDir, pkg)
+            generate(yaml, outputDir, pkg, strictPrompts)
         }
     }
 }
