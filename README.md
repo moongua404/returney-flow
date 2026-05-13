@@ -133,6 +133,65 @@ API 키는 환경변수(`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY
 
 ---
 
+## What codegen emits
+
+예시 yaml(`report-analysis-flow.yaml`):
+
+```yaml
+name: report-analysis
+prerequisites:
+  - { name: methodologyId, type: java.lang.String }
+  - { name: chatSession,   type: com.example.domain.ChatSession }
+nodes:
+  - id: build_seed_results
+    type: transform
+    inputs: { chatSession: Prerequisites.chatSession }
+  - id: build_conversation_history
+    type: transform
+    inputs: { chatSession: Prerequisites.chatSession }
+  - id: report_analysis
+    type: llm
+    action: report_analysis
+    critical: true
+    result: { type: java.lang.String }
+    inputs:
+      methodologyId:       Prerequisites.methodologyId
+      seedResults:         build_seed_results
+      conversationSummary: build_conversation_history
+```
+
+빌드 시 다음 3 파일이 emit된다:
+
+**`ReportAnalysisServerNodes.java`** — 소비자가 구현하는 콜백 (transform 노드만큼만 추상 메서드):
+
+```java
+public interface ReportAnalysisServerNodes {
+    String buildSeedResultsTransform(Map<String, Object> inputs);
+    String buildConversationHistoryTransform(Map<String, Object> inputs);
+}
+```
+
+**`ReportAnalysisRunner.java`** — typed 진입 클래스 (요지):
+
+```java
+public class ReportAnalysisRunner {
+    public ReportAnalysisRunner(Executor executor, LlmExecutor llmExecutor) { ... }
+
+    /** yaml prerequisites가 typed 인자로 풀려있다. */
+    public final String run(
+        UUID sessionId,
+        String methodologyId,
+        ChatSession chatSession,
+        ReportAnalysisServerNodes serverNodes) { ... }
+}
+```
+
+이게 코드젠의 핵심 가치다 — 호출자는 `Map<String, Object>` 키 오타로 런타임에 깨질 수 없고,
+yaml의 prerequisite 이름·타입과 Java 시그니처가 빌드 시점에 묶여있다.
+yaml에서 prereq 하나 추가/삭제하면 compile error로 즉시 드러난다.
+
+---
+
 ## Features
 
 | 기능 | 설명 |
@@ -145,6 +204,33 @@ API 키는 환경변수(`ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY
 | Rate limit | 모델별 60초 슬라이딩 윈도우 (RPM/TPM) |
 | Lifecycle hooks | `onNode*`/`onLlmCall`로 cost·logging·메트릭 |
 | 빌드타임 검증 | 노드 ID 중복/순환/inputs/prompt action 매칭 |
+
+---
+
+## Why this exists (vs LangChain4j / Spring AI)
+
+LangChain4j도 Spring AI도 LLM 호출 자체는 잘 한다. 그런데 **여러 LLM 호출을
+DAG로 엮어서 fan-out scatter/gather · 멀티 프로바이더 라우팅 · 빌드타임 type-safe
+codegen 까지 한 묶음으로** 제공하는 도구는 (지금까지 본 한) 없다.
+
+| 항목 | LangChain4j | Spring AI | returney-flow |
+|---|---|---|---|
+| 멀티 프로바이더 | ✓ (각자 호출) | ✓ (ChatClient 추상) | ✓ (yaml routing prefix 매칭) |
+| DAG 실행 | ✗ (AiServices는 단일 호출) | ✗ | ✓ (Kahn + virtual thread frontier) |
+| Fan-out scatter/gather | ✗ | ✗ | ✓ (자동 청크 병렬) |
+| Rate limit (모델별) | ✗ | ✗ | ✓ (sliding window, RPM/TPM) |
+| Fallback chain | △ (수동 시도) | △ (수동) | ✓ (yaml `fallback:` 1단) |
+| Retry-After 헤더 존중 | ✗ | ✗ | ✓ (RFC 7231 파싱) |
+| 빌드타임 typed codegen | ✗ (런타임 reflection) | ✗ | ✓ (Groovy → Java emit) |
+| Spring 비의존성 | ✗ (springframework dep) | — (frame 자체) | ✓ (JDK + snakeyaml + gson) |
+
+**결정 트리:**
+- 단일 LLM 호출 + Spring 사용 → **Spring AI**
+- 여러 LLM agent 체인 + 비-Spring 환경 → **LangChain4j**
+- **DAG 토폴로지 + 멀티 프로바이더 + 빌드타임 타입 안전** 셋 다 필요 → returney-flow
+
+만약 단순한 단일 LLM 호출만 한다면 이 라이브러리는 과한 도구다.
+복수의 LLM 노드를 엮어 한 흐름을 만들고, 그 흐름을 yaml 한 장으로 관리하고 싶다면 적합.
 
 ---
 
@@ -188,6 +274,27 @@ pipeline.run(prereqs, sessionId, nodeIds, config, listener)
         }
     });
 ```
+
+---
+
+## Error classification & retry behavior
+
+LLM 호출 실패는 3종으로 분류되고, 각각 처리 경로가 명확히 다르다.
+
+| 예외 | 트리거 | retry | fallback 모델 | 비고 |
+|---|---|:-:|:-:|---|
+| `LlmTransientException` | HTTP 429 / 500 / 503 | ✓ | ✓ | `Retry-After` 헤더(델타초 또는 RFC 1123 날짜) 파싱 후 존중. backoff 와 `max()` 적용 |
+| `LlmNetworkException` | IO timeout · 인터럽트 | ✓ | ✓ | `InterruptedException` 은 인터럽트 플래그 복원 후 wrap |
+| `LlmClientErrorException` | HTTP 4xx (429 제외) | ✗ | ✗ | 즉시 propagate. 호출자의 버그 또는 인증 실패는 retry 무의미 |
+
+**재시도 사이클** (`providers.yaml` `retry:` 디폴트):
+1. primary 모델 — `maxAttempts: 3`, exp backoff `500ms → 1s → 2s` + jitter 20%
+2. 모두 실패 시 → fallback 모델로 진입, **backoff index 0부터 다시** (서로 다른 capacity 가정)
+3. fallback도 실패 시 → `LlmCallException` propagate, 노드 FAILED 마킹
+
+**의도적 비-기능:**
+- 부분 성공 처리 없음 (`scatter → llm → gather` 중 청크 1개 실패하면 fan-out 전체 실패)
+- 무한 retry 없음 (caller 가 `Future.orTimeout()` 으로 abandon 가능, 단 백그라운드 호출은 listener 로 추적)
 
 ---
 
