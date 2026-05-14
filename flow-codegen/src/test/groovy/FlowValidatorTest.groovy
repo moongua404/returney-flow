@@ -99,7 +99,9 @@ class FlowValidatorTest {
     @Test
     void prerequisite_ref_undeclared_strict_fail() {
         def pipeline = parseYaml("""
-            prerequisites: [sessionId]
+            prerequisites:
+              - name: sessionId
+                type: java.lang.String
             nodes:
               - id: a
                 type: llm
@@ -115,7 +117,11 @@ class FlowValidatorTest {
     @Test
     void valid_dag_passes() {
         def pipeline = parseYaml("""
-            prerequisites: [sessionId, reportText]
+            prerequisites:
+              - name: sessionId
+                type: java.lang.String
+              - name: reportText
+                type: java.lang.String
             nodes:
               - id: a
                 type: llm
@@ -185,7 +191,9 @@ class FlowValidatorTest {
                 type: llm
                 action: analyze
                 inputs: { x: Prerequisites.x }
-            prerequisites: [x]
+            prerequisites:
+              - name: x
+                type: java.lang.String
         """)
 
         assertThatCode({ FlowValidator.validateAll(pipeline, promptsDir.toFile()) })
@@ -208,7 +216,9 @@ class FlowValidatorTest {
                 type: llm
                 action: analyze
                 inputs: { other: Prerequisites.other }
-            prerequisites: [other]
+            prerequisites:
+              - name: other
+                type: java.lang.String
         """)
 
         // lenient — stderr 경고지만 빌드는 통과
@@ -240,7 +250,9 @@ class FlowValidatorTest {
                 type: llm
                 action: analyze
                 inputs: { x: Prerequisites.x }
-            prerequisites: [x]
+            prerequisites:
+              - name: x
+                type: java.lang.String
         """)
 
         assertThatCode({ FlowValidator.validateAll(pipeline, promptsDir.toFile()) })

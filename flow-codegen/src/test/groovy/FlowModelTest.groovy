@@ -21,11 +21,18 @@ class FlowModelTest {
     void prerequisites_are_extracted() {
         def pipeline = parseYaml("""
             name: test
-            prerequisites: [sessionId, userId, reportText]
+            prerequisites:
+              - name: sessionId
+                type: java.lang.String
+              - name: userId
+                type: java.lang.String
+              - name: reportText
+                type: java.lang.String
             nodes: []
         """)
         def model = FlowModel.from(pipeline, 'p')
-        assertThat(model.prerequisites).containsExactly("sessionId", "userId", "reportText")
+        assertThat(model.prerequisites.collect { it.name }).containsExactly("sessionId", "userId", "reportText")
+        assertThat(model.prerequisites.collect { it.fqcn }).containsOnly("java.lang.String")
     }
 
     @Test
@@ -172,7 +179,9 @@ class FlowModelTest {
     void field_refs_skip_prerequisite_and_plain_node_refs() {
         def pipeline = parseYaml("""
             name: test
-            prerequisites: [reportText]
+            prerequisites:
+              - name: reportText
+                type: java.lang.String
             nodes:
               - id: a
                 type: llm

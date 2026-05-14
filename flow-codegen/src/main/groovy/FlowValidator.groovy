@@ -31,8 +31,8 @@ class FlowValidator {
         validateUniqueNodeIds(nodes)
         validateInputSources(nodes)
         validateNoCycles(nodes)
-        validatePrerequisiteRefs(nodes,
-            ((pipeline.prerequisites as List<String>) ?: []) as Set)
+        validatePrerequisiteRefs(nodes, extractPrereqNames(pipeline.prerequisites as List))
+        validateConditionalNodes(nodes)
 
         if (promptsDir != null && promptsDir.exists()) {
             def actionToFile = scanPrompts(promptsDir)
@@ -86,12 +86,51 @@ class FlowValidator {
         }
     }
 
-    /** Prerequisites.xxx 참조가 실제 선언된 prerequisite인지 확인한다. */
+    /** CONDITIONAL 노드는 inputs.condition 필수. */
+    static void validateConditionalNodes(List<Map> nodes) {
+        nodes.findAll { (it.type as String)?.toLowerCase() == 'conditional' }.each { node ->
+            def inputs = (node.inputs as Map) ?: [:]
+            if (!inputs.containsKey('condition')) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] CONDITIONAL node '${node.id}' must declare an input named 'condition' " +
+                    "(referencing a Prerequisites.xxx or upstream node output evaluating to 'true'/other)")
+            }
+            if (node.result?.type != null) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] CONDITIONAL node '${node.id}' must not declare result.type — " +
+                    "gate is a control-flow node, not a data producer")
+            }
+        }
+    }
+
+    /** prerequisites 목록에서 이름 집합을 추출한다. 모든 항목은 {name, type} Map 형식이어야 한다. */
+    private static Set<String> extractPrereqNames(List items) {
+        if (!items) return [] as Set
+        items.collect { item ->
+            if (item instanceof String) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] Prerequisite '${item}' must declare explicit type. " +
+                    "Use '- name: ${item}\n  type: java.lang.String' instead of '- ${item}'")
+            }
+            def m = item as Map
+            if (!m.type) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] Prerequisite '${m.name}' is missing required 'type:' field.")
+            }
+            m.name as String
+        }.findAll { it } as Set
+    }
+
+    /**
+     * Prerequisites.xxx 또는 Prerequisites.xxx.field 참조가 실제 선언된 prerequisite인지 확인한다.
+     * dot-access(Prerequisites.foo.bar)의 경우 foo만 declared에서 검증한다.
+     */
     static void validatePrerequisiteRefs(List<Map> nodes, Set<String> declared) {
         nodes.each { node ->
             ((node.inputs as Map)?.values() ?: []).each { spec ->
                 if ((spec as String).startsWith(PREREQ_PREFIX)) {
-                    def name = (spec as String).substring(PREREQ_PREFIX.length())
+                    def rest = (spec as String).substring(PREREQ_PREFIX.length())
+                    def name = rest.contains('.') ? rest.substring(0, rest.indexOf('.')) : rest
                     if (!declared.contains(name)) {
                         throw new IllegalArgumentException(
                             "[FlowCodegen] Node '${node.id}' references undeclared prerequisite: ${name}")

@@ -47,11 +47,7 @@ public class ClaudeLlmExecutor implements LlmExecutor {
 
   @Override
   public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
-    if (request.isConversation()) {
-      boolean enableCache = request.cache() != null && request.cache().enabled();
-      return callApi(buildConversationBody(request.systemPrompt(), request.messages(), request.model(), enableCache), request.model());
-    }
-    return callApi(buildSingleBody(request.singlePrompt(), request.model(), request.thinkingBudget()), request.model());
+    return callApi(buildBody(request), request.model());
   }
 
   private LlmRawResponse callApi(String body, String model) {
@@ -61,18 +57,28 @@ public class ClaudeLlmExecutor implements LlmExecutor {
     return parseResponse(responseBody);
   }
 
-  private String buildSingleBody(String prompt, String model, int thinkingBudget) {
-    Thinking thinking = thinkingBudget > 0 ? new Thinking("enabled", thinkingBudget) : null;
-    return GSON.toJson(new Req(model, resolveMaxTokens(model), null, List.of(new Msg("user", prompt)), thinking));
-  }
-
-  private String buildConversationBody(
-      String systemPrompt, List<LlmRequest.Message> messages, String model, boolean enableCache) {
-    Object system = enableCache
-        ? List.of(new SystemBlock("text", systemPrompt, new CacheControl("ephemeral")))
-        : systemPrompt;
-    List<Msg> apiMessages = messages.stream().map(m -> new Msg(m.role(), m.content())).toList();
-    return GSON.toJson(new Req(model, resolveMaxTokens(model), system, apiMessages, null));
+  /**
+   * 단일 user 메시지 + 선택적 system + 선택적 thinking. multi-turn 대화는 호출자가
+   * prompt 텍스트에 history를 포함시켜 넘긴다.
+   *
+   * <p>system이 있고 cacheEnabled면 cache_control: ephemeral 적용 — 같은 system prefix
+   * 재사용 시 입력 토큰이 cached로 청구된다.
+   *
+   * <p>JSON 출력 강제는 prompt + 호출자 단의 fallback wrap에 의존. assistant prefill {@code "{"}을
+   * 시도했었으나 sonnet이 즉시 stop을 유발해 빈 content block을 돌려주는 변동성이 있어 revert함.
+   * 정도(正道) 처방은 tool-use 강제(별 PR).
+   */
+  private String buildBody(LlmRequest request) {
+    Thinking thinking =
+        request.thinkingBudget() > 0 ? new Thinking("enabled", request.thinkingBudget()) : null;
+    Object system = null;
+    if (request.systemPrompt() != null && !request.systemPrompt().isBlank()) {
+      system = request.cacheEnabled()
+          ? List.of(new SystemBlock("text", request.systemPrompt(), new CacheControl("ephemeral")))
+          : request.systemPrompt();
+    }
+    List<Msg> messages = List.of(new Msg("user", request.prompt()));
+    return GSON.toJson(new Req(request.model(), resolveMaxTokens(request.model()), system, messages, thinking));
   }
 
   private LlmRawResponse parseResponse(String rawResponse) {
@@ -81,7 +87,11 @@ public class ClaudeLlmExecutor implements LlmExecutor {
     if (resp.content() != null) {
       for (Block block : resp.content()) {
         if ("text".equals(block.type())) {
-          text = HttpUtil.stripCodeBlock(block.text());
+          // stripCodeBlock(null)은 null을 그대로 반환. claude-sonnet-4-6 등에서 silent하게 빈
+          // content를 반환하는 케이스(GitHub anthropics/claude-code-action #1243)가 알려져 있어
+          // 여기서 null을 ""로 정규화 — 호출자/파서가 NPE 없이 fallback 처리하도록.
+          String stripped = HttpUtil.stripCodeBlock(block.text());
+          text = stripped != null ? stripped : "";
           break;
         }
       }

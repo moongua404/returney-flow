@@ -8,25 +8,26 @@ import com.returney.flow.domain.llm.LlmCallContext;
 import com.returney.flow.domain.llm.LlmRawResponse;
 import com.returney.flow.domain.llm.LlmRequest;
 import java.net.http.HttpClient;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Gemini API LlmExecutor 구현체.
+ * Gemini API LlmExecutor 구현체. Flash / Pro / Lite 모든 Gemini 모델을 처리한다.
  *
- * <p>Flash / Pro / Lite 모든 Gemini 모델을 처리한다.
- * Spring 의존 없이 {@code java.net.http.HttpClient}와 Gson만 사용한다.
+ * <p>요청은 항상 {@code system_instruction(optional) + contents=[user prompt (+optional binary)]}
+ * 단일 형식. multi-turn 대화 상태는 호출자가 prompt 텍스트에 미리 인터폴레이션해야 한다.
  */
 public class GeminiLlmExecutor implements LlmExecutor {
 
   private static final String PROVIDER = "Gemini";
   private static final Gson GSON = new Gson();
-  private static final Map<String, String> HEADERS = Map.of();
 
   private final GeminiConfig config;
   private final HttpClient httpClient;
   private final int requestTimeoutSec;
+  private final Map<String, String> headers;
 
   public GeminiLlmExecutor(GeminiConfig config) {
     this(config, 10, 300);
@@ -36,28 +37,64 @@ public class GeminiLlmExecutor implements LlmExecutor {
     this.config = config;
     this.httpClient = HttpUtil.newClient(connectTimeoutSec);
     this.requestTimeoutSec = requestTimeoutSec;
+    this.headers = Map.of("X-Goog-Api-Key", config.apiKey());
   }
 
   @Override
   public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
-    String renderedPrompt = request.singlePrompt();
     String effectiveModel = (request.model() != null && !request.model().isEmpty())
         ? request.model() : config.defaultModel();
-    String url = config.baseUrl() + "/" + effectiveModel + ":generateContent?key=" + config.apiKey();
-    String body = request.isMultimodal()
-        ? buildMultimodalBody(renderedPrompt, request.binaryContent(), request.mimeType())
-        : buildRequestBody(renderedPrompt, request.thinkingBudget());
+    String url = config.baseUrl() + "/" + effectiveModel + ":generateContent";
+
+    String body = buildBody(request);
     String responseBody = HttpUtil.postJsonOrThrow(
-        httpClient, url, body, HEADERS, PROVIDER, requestTimeoutSec);
+        httpClient, url, body, headers, PROVIDER, requestTimeoutSec);
     Resp resp = parseResp(responseBody);
     String text = extractText(resp);
-    // 실측 토큰을 응답의 usageMetadata에서 가져옴. 없을 때만 length 기반 추정 폴백.
+
     UsageMetadata usage = resp != null ? resp.usageMetadata() : null;
-    int inputTokens = usage != null ? usage.promptTokenCount() : estimateTokens(renderedPrompt);
+    int inputTokens = usage != null
+        ? usage.promptTokenCount()
+        : estimateTokens(combineForEstimate(request.systemPrompt(), request.prompt()));
     int candidateTokens = usage != null ? usage.candidatesTokenCount() : estimateTokens(text);
     int thinkingTokens = usage != null ? usage.thoughtsTokenCount() : 0;
     int outputTokens = Math.max(0, candidateTokens - thinkingTokens);
     return new LlmRawResponse(text, inputTokens, outputTokens, thinkingTokens, 0, 0);
+  }
+
+  private String buildBody(LlmRequest request) {
+    int budget = request.thinkingBudget();
+    ThinkingConfig thinkingConfig = budget > 0 ? new ThinkingConfig(budget) : null;
+    // 멀티모달 요청은 결정성을 위해 temperature 0.1 (기존 동작 유지).
+    double temperature = request.isMultimodal() ? 0.1 : config.temperature();
+    // 모든 호출은 strict JSON 응답 강제. 현 시점 22개 prompt 전부 JSON 출력 기대 — 평문
+    // reasoning을 그대로 답하던 모델 변동성을 차단한다.
+    GenerationConfig genConfig =
+        new GenerationConfig(
+            temperature, config.maxOutputTokens(), thinkingConfig, "application/json");
+
+    List<Part> parts = new ArrayList<>(2);
+    parts.add(new Part(request.prompt(), null));
+    if (request.isMultimodal()) {
+      String base64 = Base64.getEncoder().encodeToString(request.binaryContent());
+      parts.add(new Part(null, new InlineData(request.mimeType(), base64)));
+    }
+    Content userContent = new Content("user", parts);
+
+    SystemInstruction sys =
+        (request.systemPrompt() != null && !request.systemPrompt().isBlank())
+            ? new SystemInstruction(List.of(new Part(request.systemPrompt(), null)))
+            : null;
+    return GSON.toJson(new Req(sys, List.of(userContent), genConfig));
+  }
+
+  private static String combineForEstimate(String system, String prompt) {
+    int sysLen = system != null ? system.length() : 0;
+    int pLen = prompt != null ? prompt.length() : 0;
+    StringBuilder sb = new StringBuilder(sysLen + pLen);
+    if (system != null) sb.append(system);
+    if (prompt != null) sb.append(prompt);
+    return sb.toString();
   }
 
   private Resp parseResp(String json) {
@@ -66,21 +103,6 @@ public class GeminiLlmExecutor implements LlmExecutor {
     } catch (Exception e) {
       return null;
     }
-  }
-
-  private String buildRequestBody(String prompt, int thinkingBudget) {
-    ThinkingConfig thinkingConfig = thinkingBudget > 0 ? new ThinkingConfig(thinkingBudget) : null;
-    GenerationConfig genConfig = new GenerationConfig(config.temperature(), config.maxOutputTokens(), thinkingConfig);
-    return GSON.toJson(new Req(List.of(new Content(List.of(new Part(prompt, null)))), genConfig));
-  }
-
-  private String buildMultimodalBody(String textPrompt, byte[] binary, String mimeType) {
-    String base64 = Base64.getEncoder().encodeToString(binary);
-    GenerationConfig genConfig = new GenerationConfig(0.1, config.maxOutputTokens(), null);
-    List<Part> parts = List.of(
-        new Part(textPrompt, null),
-        new Part(null, new InlineData(mimeType, base64)));
-    return GSON.toJson(new Req(List.of(new Content(parts)), genConfig));
   }
 
   private String extractText(Resp resp) {
@@ -102,15 +124,24 @@ public class GeminiLlmExecutor implements LlmExecutor {
 
   // ── Request DTOs ──────────────────────────────────────────────────────────
 
-  private record Req(List<Content> contents, GenerationConfig generationConfig) {}
+  private record Req(
+      @SerializedName("system_instruction") SystemInstruction systemInstruction,
+      List<Content> contents,
+      GenerationConfig generationConfig) {}
 
-  private record Content(List<Part> parts) {}
+  private record SystemInstruction(List<Part> parts) {}
+
+  private record Content(String role, List<Part> parts) {}
 
   private record Part(String text, @SerializedName("inline_data") InlineData inlineData) {}
 
   private record InlineData(@SerializedName("mime_type") String mimeType, String data) {}
 
-  private record GenerationConfig(double temperature, int maxOutputTokens, ThinkingConfig thinkingConfig) {}
+  private record GenerationConfig(
+      double temperature,
+      int maxOutputTokens,
+      ThinkingConfig thinkingConfig,
+      @SerializedName("response_mime_type") String responseMimeType) {}
 
   private record ThinkingConfig(int thinkingBudget) {}
 
@@ -128,5 +159,4 @@ public class GeminiLlmExecutor implements LlmExecutor {
       @SerializedName("promptTokenCount") int promptTokenCount,
       @SerializedName("candidatesTokenCount") int candidatesTokenCount,
       @SerializedName("thoughtsTokenCount") int thoughtsTokenCount) {}
-
 }

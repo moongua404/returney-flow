@@ -18,12 +18,23 @@ public interface ApiKeySupplier {
   String get(String providerName);
 
   /**
-   * {@code System.getenv("<NAME>_API_KEY")} 기반 기본 구현.
+   * {@code <NAME>_API_KEY} 기반 기본 구현. 환경변수 우선, 없으면 System property fallback.
+   *
+   * <p>로컬 개발에서 dotenv 같은 라이브러리는 보통 {@link System#setProperty}로 값을
+   * 주입하므로, {@link System#getenv}만 봐선 못 찾는 케이스가 발생한다 (실제로 staging
+   * 첫 가동 시 Gemini 키 미인식 사고가 있었음). 두 저장소 모두 조회하여 환경 차이를 흡수.
    *
    * <p>{@code toUpperCase()}는 기본 로케일 의존(Turkish locale에서 "i" → "İ"). 환경변수
    * 키는 ASCII만 다루므로 {@link Locale#ROOT} 명시.
    */
   static ApiKeySupplier fromEnv() {
-    return name -> System.getenv(name.toUpperCase(Locale.ROOT).replace('-', '_') + "_API_KEY");
+    return name -> {
+      String key = name.toUpperCase(Locale.ROOT).replace('-', '_') + "_API_KEY";
+      String value = System.getenv(key);
+      if (value == null || value.isBlank()) {
+        value = System.getProperty(key);
+      }
+      return value;
+    };
   }
 }

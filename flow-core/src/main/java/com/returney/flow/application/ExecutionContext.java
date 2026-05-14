@@ -2,6 +2,7 @@ package com.returney.flow.application;
 
 import com.returney.flow.domain.execution.NodeResult;
 import com.returney.flow.domain.execution.NodeStatus;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,15 +18,31 @@ public class ExecutionContext {
   private final Map<String, NodeStatus> nodeStatuses = new ConcurrentHashMap<>();
   private final Map<String, NodeResult> nodeResults = new ConcurrentHashMap<>();
   private final Map<String, List<NodeResult>> scatterResults = new ConcurrentHashMap<>();
-  private final Map<String, String> prerequisites;
+  private final Map<String, Object> prerequisites;
   private final long startTime;
 
   public ExecutionContext(
-      String sessionId, Map<String, NodeResult> seeds, Map<String, String> prerequisites) {
+      String sessionId, Map<String, NodeResult> seeds, Map<String, Object> prerequisites) {
     this.sessionId = sessionId;
-    this.prerequisites = prerequisites != null ? Map.copyOf(prerequisites) : Map.of();
+    this.prerequisites = sanitizePrerequisites(prerequisites);
     this.startTime = System.currentTimeMillis();
     if (seeds != null) nodeResults.putAll(seeds);
+  }
+
+  /**
+   * null value를 빈 문자열로 정상화한 immutable 복사본을 반환.
+   *
+   * <p>{@link Map#copyOf}가 null entry를 거부해 NPE를 던지는 문제 회피.
+   * prompts에서 "값 없음"은 빈 문자열로 렌더되는 게 자연스럽다.
+   */
+  private static Map<String, Object> sanitizePrerequisites(Map<String, Object> input) {
+    if (input == null || input.isEmpty()) return Map.of();
+    Map<String, Object> sanitized = new HashMap<>(input.size());
+    for (Map.Entry<String, Object> e : input.entrySet()) {
+      if (e.getKey() == null) continue;
+      sanitized.put(e.getKey(), e.getValue() != null ? e.getValue() : "");
+    }
+    return Map.copyOf(sanitized);
   }
 
   public String sessionId() {
@@ -80,11 +97,11 @@ public class ExecutionContext {
 
   // ── prerequisites ─────────────────────────────────────────────────────────
 
-  public String getPrerequisite(String name) {
+  public Object getPrerequisite(String name) {
     return prerequisites.get(name);
   }
 
-  public Map<String, String> allPrerequisites() {
+  public Map<String, Object> allPrerequisites() {
     return prerequisites;
   }
 

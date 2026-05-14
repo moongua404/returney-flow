@@ -11,7 +11,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * 파이프라인 실행 진입점 (in-port).
  *
- * <p>소비자는 {@link FlowCore#create}로 구현체를 얻는다.
+ * <p>소비자는 {@link PipelineRunnerFactory}를 ServiceLoader로 획득해 조립한다.
  */
 public interface PipelineRunner {
 
@@ -21,5 +21,5 @@ public interface PipelineRunner {
       Set<String> nodeIds,
       ExecutionConfig config,
       Map<String, NodeResult> seedResults,
-      Map<String, String> prerequisites);
+      Map<String, Object> prerequisites);
 }

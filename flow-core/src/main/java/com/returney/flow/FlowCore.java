@@ -13,12 +13,9 @@ import com.returney.flow.port.ServerNodeExecutor;
 import java.util.concurrent.Executor;
 
 /**
- * flow-core 진입점 팩토리.
- *
- * <p>SPI 구현체를 받아 {@link PipelineRunner}를 조립한다.
- * 소비자는 내부 구현 클래스를 직접 참조하지 않아도 된다.
+ * flow-core 내부 조립 팩토리. 외부 소비자는 {@link FlowCoreRunnerFactory}를 통해 접근한다.
  */
-public final class FlowCore {
+final class FlowCore {
 
   private FlowCore() {}
 

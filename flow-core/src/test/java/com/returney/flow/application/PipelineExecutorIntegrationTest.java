@@ -2,7 +2,7 @@ package com.returney.flow.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.returney.flow.FlowCore;
+import com.returney.flow.port.PipelineRunnerFactory;
 import com.returney.flow.domain.definition.NodeType;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineEdge;
@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,9 @@ import org.junit.jupiter.api.Test;
  * <p>실제 LLM/HTTP 없이 stub 포트들로 다양한 DAG 시나리오를 검증한다.
  */
 class PipelineExecutorIntegrationTest {
+
+  private static final PipelineRunnerFactory FACTORY =
+      ServiceLoader.load(PipelineRunnerFactory.class).findFirst().orElseThrow();
 
   private static PipelineNode llmNode(String id, Map<String, String> inputs) {
     return new PipelineNode(id, id, NodeType.LLM, inputs, "java.lang.String", false);
@@ -73,9 +77,9 @@ class PipelineExecutorIntegrationTest {
   private static final ServerNodeExecutor NULL_SERVER =
       new ServerNodeExecutor() {
         @Override public boolean supports(String id) { return false; }
-        @Override public List<String> scatter(String id, Map<String, String> i) { throw new IllegalStateException(); }
+        @Override public List<String> scatter(String id, Map<String, Object> i) { throw new IllegalStateException(); }
         @Override public String gather(String id, List<String> c) { throw new IllegalStateException(); }
-        @Override public String transform(String id, Map<String, String> i) { throw new IllegalStateException(); }
+        @Override public String transform(String id, Map<String, Object> i) { throw new IllegalStateException(); }
       };
 
   /** 발생한 listener 이벤트를 순서대로 캡처. */
@@ -99,7 +103,7 @@ class PipelineExecutorIntegrationTest {
         List.of(new PipelineEdge("a", "b"), new PipelineEdge("b", "c")));
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         fixedResponse("ok"), ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -136,7 +140,7 @@ class PipelineExecutorIntegrationTest {
             new PipelineEdge("c", "d")));
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         fixedResponse("ok"), ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -162,13 +166,13 @@ class PipelineExecutorIntegrationTest {
     Map<String, LlmExecutor> perNode = new ConcurrentHashMap<>();
     LlmExecutor selector = (req, ctx) -> {
       // action == nodeId in this test
-      String action = ECHO_RENDERER.render(req.singlePrompt(), Map.of());  // not used here
+      String action = ECHO_RENDERER.render(req.prompt(), Map.of());  // not used here
       // Just route by prompt content. ECHO_RENDERER.render returns action which equals node id.
-      return new LlmRawResponse(req.singlePrompt(), 1, 1, 2, 0, 0);
+      return new LlmRawResponse(req.prompt(), 1, 1, 2, 0, 0);
     };
     // Simpler: throw on "b", succeed elsewhere
     LlmExecutor failingOnB = (req, ctx) -> {
-      if ("b".equals(req.singlePrompt())) throw new LlmCallException("intentional");
+      if ("b".equals(req.prompt())) throw new LlmCallException("intentional");
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
 
@@ -185,7 +189,7 @@ class PipelineExecutorIntegrationTest {
             new PipelineEdge("d", "e")));
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         failingOnB, ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -218,18 +222,18 @@ class PipelineExecutorIntegrationTest {
 
     ServerNodeExecutor server = new ServerNodeExecutor() {
       @Override public boolean supports(String id) { return Set.of("split", "merge").contains(id); }
-      @Override public List<String> scatter(String id, Map<String, String> i) { return chunks; }
+      @Override public List<String> scatter(String id, Map<String, Object> i) { return chunks; }
       @Override public String gather(String id, List<String> c) { return "merged:" + String.join(",", c); }
-      @Override public String transform(String id, Map<String, String> i) { throw new IllegalStateException(); }
+      @Override public String transform(String id, Map<String, Object> i) { throw new IllegalStateException(); }
     };
 
     java.util.concurrent.atomic.AtomicInteger llmCallCount = new java.util.concurrent.atomic.AtomicInteger();
     LlmExecutor llmReflectingChunk = (req, ctx) -> {
       llmCallCount.incrementAndGet();
-      return new LlmRawResponse("processed:" + req.singlePrompt(), 1, 1, 2, 0, 0);
+      return new LlmRawResponse("processed:" + req.prompt(), 1, 1, 2, 0, 0);
     };
 
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         llmReflectingChunk, ECHO_RENDERER, server, NULL_EXTRACTOR, ExecutionListener.noop(),
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -254,10 +258,10 @@ class PipelineExecutorIntegrationTest {
         List.of(new PipelineEdge("a", "b")));
 
     Map<String, NodeResult> seed = Map.of(
-        "a", new NodeResult("seeded-a-output", 0, 0, 0));
+        "a", NodeResult.of("seeded-a-output", 0, 0, 0));
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         fixedResponse("ok"), ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -285,7 +289,7 @@ class PipelineExecutorIntegrationTest {
     // LLM에 들어간 변수를 캡처
     java.util.concurrent.atomic.AtomicReference<String> seenPrompt = new java.util.concurrent.atomic.AtomicReference<>();
     LlmExecutor capturing = (req, ctx) -> {
-      seenPrompt.set(req.singlePrompt());
+      seenPrompt.set(req.prompt());
       return new LlmRawResponse("ok", 1, 1, 2, 0, 0);
     };
 
@@ -298,7 +302,7 @@ class PipelineExecutorIntegrationTest {
       @Override public int getThinkingBudget(String action) { return 0; }
     };
 
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         capturing, reflectingRenderer, NULL_SERVER, NULL_EXTRACTOR, ExecutionListener.noop(),
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -315,7 +319,7 @@ class PipelineExecutorIntegrationTest {
         List.of(new PipelineEdge("a", "b")));
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         fixedResponse("ok"), ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 
@@ -335,7 +339,7 @@ class PipelineExecutorIntegrationTest {
         List.of());
 
     var listener = new CapturingListener();
-    PipelineRunner runner = FlowCore.create(
+    PipelineRunner runner = FACTORY.assemble(
         alwaysFailing, ECHO_RENDERER, NULL_SERVER, NULL_EXTRACTOR, listener,
         Executors.newVirtualThreadPerTaskExecutor());
 

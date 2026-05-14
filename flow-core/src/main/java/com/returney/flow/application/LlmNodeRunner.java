@@ -1,7 +1,6 @@
 package com.returney.flow.application;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.definition.PipelineNode;
 import com.returney.flow.domain.execution.ExecutionConfig;
@@ -13,6 +12,7 @@ import com.returney.flow.domain.llm.LlmRequest;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
 import com.returney.flow.port.PromptRenderer;
+import com.returney.flow.util.LlmJsonExtractor;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -55,13 +55,14 @@ public class LlmNodeRunner {
     String scatterUpstream = findScatterUpstream(node, pipelineDef, ctx);
     if (scatterUpstream != null) {
       String marker = executeFanOut(node, ctx, config, scatterUpstream);
-      return new NodeResult(marker, 0, 0, 0);
+      return NodeResult.of(marker, 0, 0, 0);
     }
     Map<String, String> variables = inputResolver.resolve(node, ctx);
     long start = System.currentTimeMillis();
     LlmRawResponse resp = callLlm(node, variables, config, parseSessionId(ctx));
     long latency = System.currentTimeMillis() - start;
-    return new NodeResult(resp.text(), latency, resp.inputTokens(), resp.outputTokens());
+    Object typed = deserialize(node, resp.text());
+    return new NodeResult(resp.text(), typed, latency, resp.inputTokens(), resp.outputTokens());
   }
 
   String runTemplate(PipelineNode node, ExecutionContext ctx) {
@@ -91,40 +92,69 @@ public class LlmNodeRunner {
     return llmExecutor.execute(buildRequest(node, variables, model, budget), callContext);
   }
 
+  /**
+   * 단일 모드 LlmRequest 빌드. flow는 대화 상태를 모르므로 multi-turn 챗 파이프라인은 호출자가
+   * yaml 변수에 history 텍스트를 미리 인터폴레이션해 넘긴다 (예: {@code conversationHistory}).
+   *
+   * <p>node.resultType이 record면 {@link com.returney.flow.util.SchemaRenderer}가 만든
+   * 평문 schema를 user prompt 끝에 자동 첨부한다 — yaml prompt에 출력 형식을 손으로 박을 필요 없음.
+   */
   private LlmRequest buildRequest(
       PipelineNode node, Map<String, String> variables, String model, int budget) {
+    String prompt = promptRenderer.render(node.action(), variables);
+    String schemaHint = renderSchemaHint(node);
+    if (schemaHint != null) prompt = prompt + schemaHint;
+
+    String systemPrompt = promptRenderer.renderSystemPrompt(node.action(), variables);
+    if (systemPrompt != null && systemPrompt.isBlank()) systemPrompt = null;
+
     String binaryB64 = variables.get("binaryContentBase64");
     String mimeType = variables.get("mimeType");
-    if (binaryB64 != null && !binaryB64.isEmpty()
-        && mimeType != null && !mimeType.isEmpty()) {
-      String prompt = promptRenderer.render(node.action(), variables);
-      return LlmRequest.multimodal(
-          prompt, Base64.getDecoder().decode(binaryB64), mimeType, model, budget);
-    }
-    String systemPrompt = promptRenderer.renderSystemPrompt(node.action(), variables);
-    if (systemPrompt != null) {
-      List<LlmRequest.Message> messages = parseMessagesOrSynthesize(node, variables);
-      return LlmRequest.conversation(
-          systemPrompt, messages, model, budget, new LlmRequest.CacheConfig(true));
-    }
-    return LlmRequest.single(promptRenderer.render(node.action(), variables), model, budget);
+    boolean hasBinary =
+        binaryB64 != null && !binaryB64.isEmpty() && mimeType != null && !mimeType.isEmpty();
+
+    return new LlmRequest(
+        model,
+        budget,
+        systemPrompt,
+        prompt,
+        true,
+        hasBinary ? Base64.getDecoder().decode(binaryB64) : null,
+        hasBinary ? mimeType : null);
   }
 
-  private List<LlmRequest.Message> parseMessagesOrSynthesize(
-      PipelineNode node, Map<String, String> variables) {
-    String messagesJson = variables.get("conversationMessagesJson");
-    if (messagesJson != null && !messagesJson.isEmpty()) {
-      List<Map<String, String>> raw = GSON.fromJson(
-          messagesJson, new TypeToken<List<Map<String, String>>>() {}.getType());
-      List<LlmRequest.Message> messages = new ArrayList<>(raw.size());
-      for (Map<String, String> m : raw) {
-        messages.add(new LlmRequest.Message(
-            m.getOrDefault("role", "user"), m.getOrDefault("content", "")));
-      }
-      return messages;
+  /**
+   * node.resultType이 record class면 SchemaRenderer로 평문 hint 생성. String/builtin/null이면
+   * null 반환 (수동 yaml 출력 블록을 쓰는 노드는 그대로 동작).
+   */
+  private String renderSchemaHint(PipelineNode node) {
+    String fqcn = node.resultType();
+    if (fqcn == null || fqcn.isBlank()) return null;
+    Class<?> type;
+    try {
+      type = Class.forName(fqcn);
+    } catch (ClassNotFoundException e) {
+      return null;
     }
-    String userPrompt = promptRenderer.renderUserPrompt(node.action(), variables);
-    return List.of(new LlmRequest.Message("user", userPrompt));
+    return com.returney.flow.util.SchemaRenderer.renderAsPrompt(type);
+  }
+
+  /**
+   * LLM 응답 텍스트를 node.resultType으로 역직렬화한다.
+   *
+   * <p>resultType이 없거나 String이면 null 반환 (raw output 그대로 사용). 역직렬화 실패 시 null 폴백
+   * — 기존 Gson-based parseResult()가 raw output으로 처리한다.
+   */
+  private static Object deserialize(PipelineNode node, String text) {
+    String fqcn = node.resultType();
+    if (fqcn == null || fqcn.isBlank() || "java.lang.String".equals(fqcn)) return null;
+    try {
+      Class<?> type = Class.forName(fqcn);
+      if (!type.isRecord() && !type.isArray()) return null;
+      return GSON.fromJson(LlmJsonExtractor.extract(text), type);
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   private String findScatterUpstream(
@@ -150,8 +180,10 @@ public class LlmNodeRunner {
           variables.put("chunk", chunk.output());
           long t = System.currentTimeMillis();
           LlmRawResponse resp = callLlm(node, variables, config, sessionId);
+          Object typed = deserialize(node, resp.text());
           return new NodeResult(
-              resp.text(), System.currentTimeMillis() - t, resp.inputTokens(), resp.outputTokens());
+              resp.text(), typed, System.currentTimeMillis() - t,
+              resp.inputTokens(), resp.outputTokens());
         } catch (LlmCallException e) {
           throw new RuntimeException(e);
         }

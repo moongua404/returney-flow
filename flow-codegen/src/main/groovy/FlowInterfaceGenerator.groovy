@@ -2,7 +2,9 @@ import org.yaml.snakeyaml.Yaml
 
 class FlowInterfaceGenerator {
 
-    /** 단일 yaml 산출물 생성. 클래스패스의 yamlResourcePath는 yaml 파일명으로 자동 결정. */
+    private static final String PIPELINE_SUBPACKAGE = 'pipeline'
+
+    /** 단일 yaml 산출물 생성. *Base.java 하나만 emit; pipeline subpackage. */
     static void generate(File pipelineYaml, File outputDir, String pkg) {
         generate(pipelineYaml, outputDir, pkg, false)
     }
@@ -13,26 +15,25 @@ class FlowInterfaceGenerator {
         File promptsDir = new File(pipelineYaml.parentFile, 'prompts')
         FlowValidator.validateAll(pipeline, promptsDir.exists() ? promptsDir : null, strictPrompts)
 
-        def model  = FlowModel.from(pipeline, pkg, pipelineYaml.name)
-        def outDir = new File(outputDir, pkg.replace('.', '/'))
+        String pipelinePkg = pkg + '.' + PIPELINE_SUBPACKAGE
+        def model  = FlowModel.from(pipeline, pipelinePkg, pipelineYaml.name)
+        def outDir = new File(outputDir, pipelinePkg.replace('.', '/'))
         outDir.mkdirs()
 
-        [
-            "${model.flowName}Prerequisites.java":  FlowRenderer.prerequisites(model),
-            "${model.flowName}Result.java":         FlowRenderer.resultRecord(model),
-            "${model.flowName}FieldExtractor.java": FlowRenderer.fieldExtractor(model),
-            "${model.flowName}LlmMiddleware.java":  FlowRenderer.llmMiddleware(model),
-            "${model.flowName}Base.java":           FlowRenderer.pipelineBase(model),
-        ].each { name, content -> new File(outDir, name).text = content }
-
-        println "[FlowCodegen] Generated ${model.flowName}Pipeline artifacts → ${outDir}"
+        def serverNodesSource = FlowRenderer.serverNodesInterface(model)
+        if (serverNodesSource != null) {
+            new File(outDir, "${model.flowName}ServerNodes.java").text = serverNodesSource
+            new File(outDir, "${model.flowName}Runner.java").text      = FlowRenderer.pipelineRunner(model)
+            println "[FlowCodegen] Generated ${model.flowName}ServerNodes + Runner + Input → ${outDir}"
+        } else {
+            new File(outDir, "${model.flowName}Runner.java").text = FlowRenderer.pipelineRunner(model)
+            println "[FlowCodegen] Generated ${model.flowName}Runner + Input → ${outDir}"
+        }
+        new File(outDir, "${model.flowName}Input.java").text = FlowRenderer.inputRecord(model)
     }
 
     /**
-     * yamlsDir 안의 {@code *-flow.yaml} 파일을 모두 스캔해 각각 산출물을 생성한다.
-     *
-     * <p>각 파이프라인의 yaml은 클래스패스 루트에 같은 이름으로 존재해야 한다
-     * (생성된 *Base 코드가 {@code parseFromClasspath(yamlName)}로 로드).
+     * yamlsDir 안의 {@code *-flow.yaml} 파일을 모두 스캔해 각각 Base 클래스를 생성한다.
      */
     static void generateAll(File yamlsDir, File outputDir, String pkg) {
         generateAll(yamlsDir, outputDir, pkg, false)

@@ -1,171 +1,136 @@
-class FlowRenderer {
-
-    static String prerequisites(FlowModel m) {
-        def fields = m.prerequisites.collect { "    String ${it}" }.join(',\n')
-        def toMapEntries = m.prerequisites.collect { '            map.put("' + it + '", ' + it + ');' }.join('\n')
-        def fromArgs = m.prerequisites.collect { '            map.get("' + it + '")' }.join(',\n')
-
-        """\
-package ${m.pkg};
-
-import java.util.HashMap;
-import java.util.Map;
-
-/** 파이프라인 외부 입력 계약. Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
-public record ${m.flowName}Prerequisites(
-${fields}
-) {
-    public static ${m.flowName}Prerequisites from(Map<String, String> map) {
-        return new ${m.flowName}Prerequisites(
-${fromArgs}
-        );
-    }
-
-    public Map<String, String> toMap() {
-        Map<String, String> map = new HashMap<>();
-${toMapEntries}
-        return map;
-    }
-}
-"""
-    }
-
-    static String resultRecord(FlowModel m) {
-        def importBlock = importsBlock(m.resultNodes.collect { it.importLine }.findAll { it })
-        def fields = m.resultNodes.collect { "    ${it.javaType} ${it.field}" }.join(',\n')
-
-        """\
-package ${m.pkg};
-${importBlock}
-/** 파이프라인 최종 출력. Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
-public record ${m.flowName}Result(
-${fields}
-) {}
-"""
-    }
-
-    static String fieldExtractor(FlowModel m) {
-        if (m.fieldRefs.isEmpty()) {
-            return """\
-package ${m.pkg};
-
-import com.returney.flow.port.NodeOutputExtractor;
-
-/** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
-public class ${m.flowName}FieldExtractor implements NodeOutputExtractor {
-
-    @Override
-    public String extract(String nodeId, String fieldName, String output) {
-        throw new IllegalArgumentException(
-            "Unknown field reference: " + nodeId + "." + fieldName);
-    }
-}
-"""
-        }
-
-        def importBlock = importsBlock(m.fieldRefs.collect { it.importLine }.findAll { it })
-        def cases = m.fieldRefs.collect { ref ->
-            """\
-            case "${ref.nodeId}.${ref.fieldName}" ->
-                GSON.fromJson(output, ${ref.javaType}.class).${ref.accessorName}();"""
-        }.join('\n')
-
-        """\
-package ${m.pkg};
-
-import com.google.gson.Gson;
-import com.returney.flow.port.NodeOutputExtractor;${importBlock}
-/** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
-public class ${m.flowName}FieldExtractor implements NodeOutputExtractor {
-
-    private static final Gson GSON = new Gson();
-
-    @Override
-    public String extract(String nodeId, String fieldName, String output) {
-        return switch (nodeId + "." + fieldName) {
-${cases}
-            default -> throw new IllegalArgumentException(
-                "Unknown field reference: " + nodeId + "." + fieldName);
-        };
-    }
-}
-"""
-    }
-
-    static String llmMiddleware(FlowModel m) {
-        """\
-package ${m.pkg};
-
-import com.returney.flow.domain.llm.LlmCallException;
-import com.returney.flow.domain.llm.LlmCallContext;
-import com.returney.flow.domain.llm.LlmRawResponse;
-import com.returney.flow.domain.llm.LlmRequest;
-import com.returney.flow.port.LlmExecutor;
-
 /**
- * ${m.flowName} 파이프라인 LLM 미들웨어. Gradle 코드젠으로 생성됨 — 직접 수정 금지.
+ * 코드젠이 emit하는 단일 산출물 *Base.java 의 텍스트를 만든다.
  *
- * <p>서브클래싱하여 {@link #beforeExecute}를 재정의하면 LLM 호출 전 요청을 가공할 수 있다.
+ * <p>이전엔 파이프라인당 5개 파일(Prerequisites/Result/FieldExtractor/LlmMiddleware/Base)을
+ * 뱉었지만, 다음 이유로 Base 하나로 통합:
+ * <ul>
+ *   <li>Prerequisites는 Map&lt;String,String&gt;을 typed record로 감쌀 뿐, 호출부는 항상
+ *       Map.of(...)로 만들어 from()을 거쳤음 → 단순 라운드트립 보일러플레이트</li>
+ *   <li>Result는 단일 결과 파이프라인(대다수)에선 wrapper 의미가 없고, 다중 결과 케이스만
+ *       호출자가 도메인 record를 직접 정의해 yaml output.type 으로 참조하면 됨</li>
+ *   <li>FieldExtractor는 Base 안 anonymous class로 inline (cross-node refs 있으면 switch,
+ *       없으면 throw default — 어차피 NodeOutputExtractor가 호출 안 됨)</li>
+ *   <li>LlmMiddleware는 모든 파이프라인이 동일 boilerplate라 flow-core/middleware/LlmMiddleware
+ *       하나만 두고 모두 공유</li>
+ * </ul>
  */
-public class ${m.flowName}LlmMiddleware implements LlmExecutor {
-
-    private final LlmExecutor delegate;
-
-    public ${m.flowName}LlmMiddleware(LlmExecutor delegate) {
-        this.delegate = delegate;
-    }
-
-    @Override
-    public LlmRawResponse execute(LlmRequest request, LlmCallContext context) throws LlmCallException {
-        return delegate.execute(beforeExecute(request), context);
-    }
-
-    protected LlmRequest beforeExecute(LlmRequest request) {
-        return request;
-    }
-}
-"""
-    }
+class FlowRenderer {
 
     static String pipelineBase(FlowModel m) {
         [
             renderHeader(m),
             renderFieldsAndConstructor(m),
             renderPublicMethods(m),
-            renderExtensionPoints(m),
             renderUserOverrides(m),
             renderInternals(m),
         ].join('\n\n')
     }
 
-    // ── pipelineBase sub-renderers ──────────────────────────────────────────
+    /**
+     * 서버 노드 콜백 인터페이스. SPI가 앱을 호출하는 방향(in-port)으로 쓰인다.
+     * 서버 노드가 없는 파이프라인이면 null 반환.
+     */
+    static String serverNodesInterface(FlowModel m) {
+        if (m.serverNodes.isEmpty()) return null
+
+        def methods = [
+            m.scatterNodes.collect { node ->
+                def mn = node.methodName.replace('Scatter', '') + 'Scatter'
+                "    java.util.List<String> ${mn}(java.util.Map<String, Object> inputs);"
+            },
+            m.gatherNodes.collect { node ->
+                def mn = node.methodName.replace('Gather', '') + 'Gather'
+                "    String ${mn}(java.util.List<String> chunks);"
+            },
+            m.transformNodes.collect { node ->
+                def mn = node.methodName.replace('Transform', '') + 'Transform'
+                node.typed
+                    ? "    com.returney.flow.domain.execution.NodeOutput ${mn}(java.util.Map<String, Object> inputs);"
+                    : "    String ${mn}(java.util.Map<String, Object> inputs);"
+            }
+        ].flatten().join('\n\n')
+
+        """\
+package ${m.pkg};
+
+import java.util.List;
+import java.util.Map;
+
+/** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
+public interface ${m.flowName}ServerNodes {
+
+${methods}
+}
+"""
+    }
+
+    /**
+     * 파이프라인 실행 진입점. 앱이 flow-core를 호출하는 방향(out-adapter)으로 쓰인다.
+     * 서버 노드가 있으면 생성자에서 {FlowName}ServerNodes를 주입받아 위임한다.
+     */
+    static String pipelineRunner(FlowModel m) {
+        [
+            renderHeaderForRunner(m),
+            renderFieldsAndConstructorForRunner(m),
+            renderPublicMethodsForRunner(m),
+            renderInternalsForRunner(m),
+        ].join('\n\n')
+    }
+
+    /** {FlowName}Input record 내용 반환. 타입 있는 prerequisites를 record 컴포넌트로 emit. */
+    static String inputRecord(FlowModel m) {
+        def sessionPkg = 'java.util.UUID'
+        def imports = ['import java.util.UUID;']
+        m.prerequisites.findAll { it.fqcn != 'java.lang.String' && !it.fqcn.startsWith('java.lang.') && !it.fqcn.startsWith('boolean') && !it.fqcn.startsWith('int') && !it.fqcn.startsWith('long') }.each { p ->
+            if (p.fqcn == 'java.util.UUID') { /* already imported */ }
+            else imports << "import ${p.fqcn};"
+        }
+        def allPrereqs = m.prerequisites
+        def components = ['    UUID sessionId']  // sessionId is always present in Input
+        allPrereqs.findAll { it.name != 'sessionId' }.each { p ->
+            components << "    ${javaParamType(p.fqcn)} ${p.name}"
+        }
+        def importBlock = imports.unique().collect { "\n${it}" }.join('')
+        """\
+package ${m.pkg};
+${importBlock}
+
+/** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
+public record ${m.flowName}Input(
+${components.join(',\n')}) {}
+"""
+    }
+
+    // ── header / fields ────────────────────────────────────────────────────
 
     private static String renderHeader(FlowModel m) {
-        def importBlock = importsBlock(m.resultNodes.collect { it.importLine }.findAll { it })
+        def prereqImports = m.prerequisites
+            .findAll { it.fqcn != 'java.lang.String' && !it.fqcn.startsWith('java.lang.')
+                && !it.fqcn.startsWith('boolean') && !it.fqcn.startsWith('int')
+                && !it.fqcn.startsWith('long') && it.fqcn != 'java.util.UUID' }
+            .collect { "import ${it.fqcn};" }
+        def importLines = prereqImports + [m.outputImportLine] +
+            m.resultNodes.collect { it.importLine } +
+            m.fieldRefs.collect { it.importLine }
+        def importBlock = importsBlock(importLines.findAll { it })
         """\
 package ${m.pkg};
 
 import com.google.gson.Gson;
-import com.returney.flow.adapter.common.SlidingWindowRateLimiter;
-import com.returney.flow.adapter.parser.PipelineYamlParser;
-import com.returney.flow.adapter.parser.ProvidersConfig;
-import com.returney.flow.adapter.parser.ProvidersYamlParser;
-import com.returney.flow.adapter.prompt.ClasspathPromptRenderer;
-import com.returney.flow.application.InternalLlmRouter;
 import com.returney.flow.domain.definition.PipelineDefinition;
 import com.returney.flow.domain.execution.ExecutionConfig;
 import com.returney.flow.domain.execution.PipelineResult;
-import com.returney.flow.port.ApiKeySupplier;
-import com.returney.flow.FlowCore;
 import com.returney.flow.port.ExecutionListener;
 import com.returney.flow.port.LlmExecutor;
+import com.returney.flow.port.NodeOutputExtractor;
 import com.returney.flow.port.PipelineRunner;
+import com.returney.flow.port.PipelineRunnerFactory;
 import com.returney.flow.port.PromptRenderer;
-import com.returney.flow.port.RateLimiter;
-import com.returney.flow.port.ServerNodeExecutor;${importBlock}
+import com.returney.flow.port.ServerNodeExecutor;
+import com.returney.flow.util.LlmJsonExtractor;
+import java.util.ServiceLoader;${importBlock}
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 
@@ -178,113 +143,226 @@ public abstract class ${m.flowName}Base {"""
         """\
     private static final Gson GSON = new Gson();
 
+    private static final PipelineRunnerFactory FLOW_FACTORY =
+        ServiceLoader.load(PipelineRunnerFactory.class).findFirst().orElseThrow();
+
     protected static final PipelineDefinition DEFINITION =
-        new PipelineYamlParser().parseFromClasspath("${m.yamlResourcePath}");
+        FLOW_FACTORY.loadDefinition("${m.yamlResourcePath}");
 
     private static final PromptRenderer RENDERER =
-        ClasspathPromptRenderer.forActions(${actionsArg});
-
-    private static final ProvidersConfig PROVIDERS_CONFIG =
-        ProvidersYamlParser.loadFromClasspath();
+        FLOW_FACTORY.classpathRenderer(${actionsArg});
 
     private final Executor executor;
-    private volatile LlmExecutor cachedLlmExecutor;
+    private final LlmExecutor llmExecutor;
 
-    protected ${m.flowName}Base(Executor executor) {
+    protected ${m.flowName}Base(Executor executor, LlmExecutor llmExecutor) {
         this.executor = executor;
+        this.llmExecutor = llmExecutor;
     }"""
     }
+
+    // ── public methods ─────────────────────────────────────────────────────
 
     private static String renderPublicMethods(FlowModel m) {
-        def criticalChecks = m.resultNodes.findAll { it.critical }
-            .collect { "if (result.${it.field}() == null) return true;" }
-            .join('\n        ')
+        String criticalCheck = renderCriticalCheck(m)
+        String typedRun = renderTypedRun(m)
         """\
-    /**
-     * 파이프라인을 실행하고 타입이 지정된 결과를 반환한다.
-     *
-     * @param prerequisites 외부 입력
-     * @param sessionId 실행 세션 ID
-     * @param nodeIds 실행할 노드 집합
-     * @param config 실행 설정 (모델 오버라이드 등)
-     * @param listener 실행 이벤트 리스너 (null → no-op)
-     */
-    public final ${m.flowName}Result run(
-        ${m.flowName}Prerequisites prerequisites,
-        UUID sessionId,
-        Set<String> nodeIds,
-        ExecutionConfig config,
-        ExecutionListener listener) {
-
-        LlmExecutor middleware = createLlmMiddleware(llmExecutor());
-        // sessionId는 LlmNodeRunner가 ExecutionContext에서 읽어 매 호출 LlmCallContext로 전달.
-        ServerNodeExecutor serverNodes = buildServerNodeExecutor();
-        ExecutionListener el = listener != null ? listener : ExecutionListener.noop();
-
-        PipelineRunner runner = FlowCore.create(
-            middleware, RENDERER, serverNodes,
-            new ${m.flowName}FieldExtractor(), el, executor);
-
-        PipelineResult raw = runner.run(
-            DEFINITION, sessionId.toString(), nodeIds,
-            config, null, prerequisites.toMap()).join();
-
-        return parseResult(raw);
-    }
+${typedRun}
 
     /** 크리티컬 노드 실패 여부를 반환한다. */
-    public final boolean isCriticalFailure(${m.flowName}Result result) {
-        // 크리티컬 필드가 null이면 실패로 판단
-        ${criticalChecks}
-        return false;
+    public final boolean isCriticalFailure(${m.outputJavaType} result) {
+        ${criticalCheck}
+    }
+
+    // ── internal: typed run의 단일 종착지 ─────────────────────────────────
+
+    /**
+     * Map 기반 직접 호출이 필요한 케이스(분석처럼 prereq를 동적으로 빌드)용 진입점.
+     * 일반 호출자는 typed run()을 쓴다.
+     */
+    public final ${m.outputJavaType} runInternal(Map<String, Object> inputs, UUID sessionId) {
+        ServerNodeExecutor serverNodes = buildServerNodeExecutor();
+        PipelineRunner runner = FLOW_FACTORY.assemble(
+            llmExecutor, RENDERER, serverNodes, buildFieldExtractor(),
+            ExecutionListener.noop(), executor);
+        PipelineResult raw = runner.run(
+            DEFINITION, sessionId.toString(), DEFINITION.nodeIds(),
+            ExecutionConfig.defaults(), null, inputs).join();
+        return parseResult(raw);
     }"""
     }
 
-    private static String renderExtensionPoints(FlowModel m) {
+    private static String renderPublicMethodsForRunner(FlowModel m) {
+        if (m.serverNodes.isEmpty()) return renderPublicMethods(m)
+
+        def snType = "${m.flowName}ServerNodes"
+        String criticalCheck = renderCriticalCheck(m)
+        String typedRun = renderTypedRunForRunner(m)
+        """\
+${typedRun}
+
+    /** 크리티컬 노드 실패 여부를 반환한다. */
+    public final boolean isCriticalFailure(${m.outputJavaType} result) {
+        ${criticalCheck}
+    }
+
+    // ── internal: typed run의 단일 종착지 ─────────────────────────────────
+
+    /**
+     * Map 기반 직접 호출이 필요한 케이스(분석처럼 prereq를 동적으로 빌드)용 진입점.
+     * 일반 호출자는 typed run()을 쓴다.
+     */
+    public final ${m.outputJavaType} runInternal(Map<String, Object> inputs, UUID sessionId, ${snType} serverNodes) {
+        ServerNodeExecutor sne = buildServerNodeExecutor(serverNodes);
+        PipelineRunner runner = FLOW_FACTORY.assemble(
+            llmExecutor, RENDERER, sne, buildFieldExtractor(),
+            ExecutionListener.noop(), executor);
+        PipelineResult raw = runner.run(
+            DEFINITION, sessionId.toString(), DEFINITION.nodeIds(),
+            ExecutionConfig.defaults(), null, inputs).join();
+        return parseResult(raw);
+    }"""
+    }
+
+    private static String renderTypedRunForRunner(FlowModel m) {
+        def snType = "${m.flowName}ServerNodes"
+        def sessionIdPrereq = m.prerequisites.find { it.name == 'sessionId' }
+        def userPrereqs = m.prerequisites.findAll { it.name != 'sessionId' }
+
+        if (userPrereqs.isEmpty() && !sessionIdPrereq) {
+            return """\
+    /** 외부 입력 없는 파이프라인. */
+    public final ${m.outputJavaType} run(UUID sessionId, ${snType} serverNodes) {
+        return runInternal(java.util.Map.of(), sessionId, serverNodes);
+    }"""
+        }
+
+        def allEntries = []
+        if (sessionIdPrereq) {
+            allEntries << '            Map.entry("sessionId", (Object) sessionId)'
+        }
+        userPrereqs.each { p ->
+            allEntries << '            Map.entry("' + p.name + '", ' + mapEntryValue(p) + ')'
+        }
+        def mapEntries = allEntries.join(',\n')
+
+        if (userPrereqs.isEmpty()) {
+            return """\
+    /** 파이프라인 실행. sessionId는 UUID에서 자동 주입. */
+    public final ${m.outputJavaType} run(UUID sessionId, ${snType} serverNodes) {
+        Map<String, Object> inputs = Map.ofEntries(
+${mapEntries});
+        return runInternal(inputs, sessionId, serverNodes);
+    }"""
+        }
+
+        def params = userPrereqs.collect { p -> "        ${javaParamType(p.fqcn)} ${p.name}" }.join(',\n')
         """\
     /**
-     * API 키 공급자. 기본은 환경변수({@code <NAME>_API_KEY}).
-     * Spring Vault 등을 쓰려면 재정의한다.
+     * 파이프라인 실행. yaml prerequisites가 typed 인자로 풀려있다.
      */
-    protected ApiKeySupplier apiKeySupplier() {
-        return ApiKeySupplier.fromEnv();
-    }
-
-    /**
-     * Rate limiter. 기본은 providers.yaml의 models.*.rate에서 구성한
-     * {@link SlidingWindowRateLimiter}. 분산 한도 등을 쓰려면 재정의한다.
-     */
-    protected RateLimiter rateLimiter() {
-        return new SlidingWindowRateLimiter(PROVIDERS_CONFIG.rateLimits());
-    }
-
-    /**
-     * LLM 실행기 팩토리. 기본은 {@link InternalLlmRouter} (providers.yaml 기반 라우팅).
-     * 외부 게이트웨이 등을 쓰려면 재정의한다.
-     */
-    protected LlmExecutor createLlmExecutor() {
-        return InternalLlmRouter.from(PROVIDERS_CONFIG, apiKeySupplier(), rateLimiter());
-    }
-
-    private LlmExecutor llmExecutor() {
-        LlmExecutor local = cachedLlmExecutor;
-        if (local == null) {
-            synchronized (this) {
-                local = cachedLlmExecutor;
-                if (local == null) {
-                    local = createLlmExecutor();
-                    cachedLlmExecutor = local;
-                }
-            }
-        }
-        return local;
-    }
-
-    /** LLM 미들웨어 팩토리. 재정의하여 LLM 호출을 가로챌 수 있다. */
-    protected LlmExecutor createLlmMiddleware(LlmExecutor base) {
-        return new ${m.flowName}LlmMiddleware(base);
+    public final ${m.outputJavaType} run(
+        UUID sessionId,
+${params},
+        ${snType} serverNodes) {
+        Map<String, Object> inputs = Map.ofEntries(
+${mapEntries});
+        return runInternal(inputs, sessionId, serverNodes);
     }"""
     }
+
+    /**
+     * yaml prerequisites 리스트를 풀어 typed 메서드 파라미터로 emit한다.
+     *
+     * <p>{@code sessionId} prereq는 UUID 인자로 고정 — 나머지는 선언 타입(UUID, boolean, String 등)
+     * 그대로 파라미터가 된다. Map&lt;String,Object&gt; inputs를 구성해 runInternal에 넘긴다.
+     */
+    private static String renderTypedRun(FlowModel m) {
+        def sessionIdPrereq = m.prerequisites.find { it.name == 'sessionId' }
+        def userPrereqs = m.prerequisites.findAll { it.name != 'sessionId' }
+
+        if (userPrereqs.isEmpty() && !sessionIdPrereq) {
+            return """\
+    /** 외부 입력 없는 파이프라인. */
+    public final ${m.outputJavaType} run(UUID sessionId) {
+        return runInternal(java.util.Map.of(), sessionId);
+    }"""
+        }
+
+        def allEntries = []
+        if (sessionIdPrereq) {
+            allEntries << '            Map.entry("sessionId", (Object) sessionId)'
+        }
+        userPrereqs.each { p ->
+            allEntries << '            Map.entry("' + p.name + '", ' + mapEntryValue(p) + ')'
+        }
+        def mapEntries = allEntries.join(',\n')
+
+        if (userPrereqs.isEmpty()) {
+            return """\
+    /** 파이프라인 실행. sessionId는 UUID에서 자동 주입. */
+    public final ${m.outputJavaType} run(UUID sessionId) {
+        Map<String, Object> inputs = Map.ofEntries(
+${mapEntries});
+        return runInternal(inputs, sessionId);
+    }"""
+        }
+
+        def params = userPrereqs.collect { p -> "        ${javaParamType(p.fqcn)} ${p.name}" }.join(',\n')
+        """\
+    /**
+     * 파이프라인 실행. yaml prerequisites가 typed 인자로 풀려있다.
+     */
+    public final ${m.outputJavaType} run(
+        UUID sessionId,
+${params}) {
+        Map<String, Object> inputs = Map.ofEntries(
+${mapEntries});
+        return runInternal(inputs, sessionId);
+    }
+
+    /** run(Input) 오버로드 — typed Input record로 호출. */
+    public final ${m.outputJavaType} run(${m.flowName}Input input) {
+        return run(${(['input.sessionId()'] + userPrereqs.collect { 'input.' + it.name + '()' }).join(', ')});
+    }"""
+    }
+
+    /** prereq를 Map<String,Object> entry 값으로 변환하는 표현식. 엔진 내부에서 직렬화하므로 변환 없음. */
+    private static String mapEntryValue(FlowModel.Prerequisite p) {
+        return "(Object) ${p.name}"
+    }
+
+    /** fqcn → 생성 코드에서 쓸 Java 파라미터 타입 표현 (boolean, UUID, String 등). */
+    private static String javaParamType(String fqcn) {
+        switch (fqcn) {
+            case 'boolean':
+            case 'java.lang.Boolean': return 'boolean'
+            case 'int':
+            case 'java.lang.Integer': return 'int'
+            case 'long':
+            case 'java.lang.Long':    return 'long'
+            case 'java.util.UUID':    return 'UUID'
+            case 'java.lang.String':  return 'String'
+            default:
+                def parts = fqcn.split('\\.')
+                return parts.last()
+        }
+    }
+
+    private static String renderCriticalCheck(FlowModel m) {
+        if (m.singleResult) {
+            // 단일 결과: result 자체가 null이면 critical 실패
+            return m.resultNodes[0].critical
+                ? "return result == null;"
+                : "return false;"
+        }
+        def checks = m.resultNodes.findAll { it.critical }
+            .collect { "if (result.${it.field}() == null) return true;" }
+        if (checks.isEmpty()) return "return false;"
+        "${checks.join('\n        ')}\n        return false;"
+    }
+
+    // ── user overrides (server nodes + hooks) ──────────────────────────────
 
     private static String renderUserOverrides(FlowModel m) {
         def hookMethods = m.resultNodes.findAll { it.hook }.collect { node ->
@@ -292,13 +370,20 @@ public abstract class ${m.flowName}Base {"""
         }.join('\n\n')
 
         def abstractMethods = [
-            m.scatterNodes.collect { abstractServerSig(it, 'Scatter', 'java.util.List<String>', 'java.util.Map<String, String> inputs') },
+            m.scatterNodes.collect { abstractServerSig(it, 'Scatter', 'java.util.List<String>', 'java.util.Map<String, Object> inputs') },
             m.gatherNodes.collect { abstractServerSig(it, 'Gather', 'String', 'java.util.List<String> chunks') },
-            m.transformNodes.collect { abstractServerSig(it, 'Transform', 'String', 'java.util.Map<String, String> inputs') }
+            m.transformNodes.collect { node ->
+                def returnType = node.typed
+                    ? 'com.returney.flow.domain.execution.NodeOutput'
+                    : 'String'
+                abstractServerSig(node, 'Transform', returnType, 'java.util.Map<String, Object> inputs')
+            }
         ].flatten().join('\n\n')
 
         hookMethods ? "${hookMethods}\n\n${abstractMethods}" : abstractMethods
     }
+
+    // ── internals (FieldExtractor + ServerNodeExecutor + parseResult) ─────
 
     private static String renderInternals(FlowModel m) {
         def supportedIds = m.serverNodes.collect { '"' + it.id + '"' }.join(', ')
@@ -307,7 +392,21 @@ public abstract class ${m.flowName}Base {"""
         def gatherCases = switchOrThrow(
             m.gatherNodes.collect { serverDispatchCase(it, 'Gather', 'chunks') }, 'gather')
         def transformCases = switchOrThrow(
-            m.transformNodes.collect { serverDispatchCase(it, 'Transform', 'inputs') }, 'transform')
+            m.transformNodes.collect { node ->
+                def methodName = node.methodName.replace('Transform', '') + 'Transform'
+                node.typed
+                    ? "                case \"${node.id}\" -> ${methodName}(inputs).prompt();"
+                    : "                case \"${node.id}\" -> ${methodName}(inputs);"
+            }, 'transform')
+        def transformTypedCases = switchOrThrow(
+            m.transformNodes.collect { node ->
+                def methodName = node.methodName.replace('Transform', '') + 'Transform'
+                node.typed
+                    ? "                case \"${node.id}\" -> ${methodName}(inputs);"
+                    : "                case \"${node.id}\" -> com.returney.flow.domain.execution.NodeOutput.textOnly(${methodName}(inputs));"
+            }, 'transformTyped')
+
+        def fieldExtractorBody = renderFieldExtractorBody(m)
 
         def parseBlocks = m.resultNodes.collect { node ->
             def hookCall = node.hook
@@ -320,10 +419,25 @@ public abstract class ${m.flowName}Base {"""
         }${hookCall}"""
         }.join('\n\n')
 
-        def resultArgs = m.resultNodes.collect { it.field }.join(', ')
+        def returnStmt
+        if (m.singleResult) {
+            returnStmt = "        return ${m.resultNodes[0].field};"
+        } else {
+            def args = m.resultNodes.collect { it.field }.join(', ')
+            returnStmt = "        return new ${m.outputJavaType}(${args});"
+        }
 
         """\
     // ── internal ─────────────────────────────────────────────────────────────
+
+    private NodeOutputExtractor buildFieldExtractor() {
+        return new NodeOutputExtractor() {
+            @Override
+            public String extract(String nodeId, String fieldName, String output) {
+                ${fieldExtractorBody}
+            }
+        };
+    }
 
     private ServerNodeExecutor buildServerNodeExecutor() {
         return new ServerNodeExecutor() {
@@ -332,7 +446,7 @@ public abstract class ${m.flowName}Base {"""
                 return java.util.Set.of(${supportedIds}).contains(nodeId);
             }
             @Override
-            public List<String> scatter(String nodeId, Map<String, String> inputs) {
+            public List<String> scatter(String nodeId, Map<String, Object> inputs) {
                 ${scatterCases}
             }
             @Override
@@ -340,34 +454,59 @@ public abstract class ${m.flowName}Base {"""
                 ${gatherCases}
             }
             @Override
-            public String transform(String nodeId, Map<String, String> inputs) {
+            public String transform(String nodeId, Map<String, Object> inputs) {
                 ${transformCases}
+            }
+            @Override
+            public com.returney.flow.domain.execution.NodeOutput transformTyped(String nodeId, Map<String, Object> inputs) {
+                ${transformTypedCases}
             }
         };
     }
 
-    private ${m.flowName}Result parseResult(PipelineResult result) {
+    @SuppressWarnings("unchecked")
+    private static <T> T extractTyped(
+            com.returney.flow.domain.execution.NodeResult node, Class<T> type) {
+        if (node != null && node.typedOutput() != null) return type.cast(node.typedOutput());
+        String raw = node != null ? node.output() : null;
+        return GSON.fromJson(LlmJsonExtractor.extract(raw), type);
+    }
+
+    private ${m.outputJavaType} parseResult(PipelineResult result) {
 ${parseBlocks}
 
-        return new ${m.flowName}Result(${resultArgs});
+${returnStmt}
     }
 }
 """
     }
 
-    /** scatter/gather/transform 추상 메서드 시그니처 한 줄. */
+    private static String renderFieldExtractorBody(FlowModel m) {
+        if (m.fieldRefs.isEmpty()) {
+            return """throw new IllegalArgumentException(
+                    "Unknown field reference: " + nodeId + "." + fieldName);"""
+        }
+        def cases = m.fieldRefs.collect { ref ->
+            """\
+                    case "${ref.nodeId}.${ref.fieldName}" ->
+                        GSON.fromJson(LlmJsonExtractor.extract(output), ${ref.javaType}.class).${ref.accessorName}();"""
+        }.join('\n')
+        """return switch (nodeId + "." + fieldName) {
+${cases}
+                    default -> throw new IllegalArgumentException(
+                        "Unknown field reference: " + nodeId + "." + fieldName);
+                };"""
+    }
+
     private static String abstractServerSig(FlowModel.ServerNode node, String suffix, String returnType, String params) {
         def methodName = node.methodName.replace(suffix, '') + suffix
         "    protected abstract ${returnType} ${methodName}(${params});"
     }
 
-    /** ServerNodeExecutor 익명 구현의 switch case 한 줄. */
     private static String serverDispatchCase(FlowModel.ServerNode node, String suffix, String argName) {
         def methodName = node.methodName.replace(suffix, '') + suffix
         """                case "${node.id}" -> ${methodName}(${argName});"""
     }
-
-    // ── template utilities ────────────────────────────────────────────────────
 
     private static String switchOrThrow(List<String> cases, String label) {
         if (cases.isEmpty()) {
@@ -384,5 +523,170 @@ ${cases.join('\n')}
         if (!importLines) return ""
         def unique = importLines.unique()
         "\n${unique.join('\n')}"
+    }
+
+    // ── Runner-specific renders ────────────────────────────────────────────
+
+    private static String renderHeaderForRunner(FlowModel m) {
+        def prereqImports = m.prerequisites
+            .findAll { it.fqcn != 'java.lang.String' && !it.fqcn.startsWith('java.lang.')
+                && !it.fqcn.startsWith('boolean') && !it.fqcn.startsWith('int')
+                && !it.fqcn.startsWith('long') && it.fqcn != 'java.util.UUID' }
+            .collect { "import ${it.fqcn};" }
+        def importLines = prereqImports + [m.outputImportLine] +
+            m.resultNodes.collect { it.importLine } +
+            m.fieldRefs.collect { it.importLine }
+        def importBlock = importsBlock(importLines.findAll { it })
+        """\
+package ${m.pkg};
+
+import com.google.gson.Gson;
+import com.returney.flow.domain.definition.PipelineDefinition;
+import com.returney.flow.domain.execution.ExecutionConfig;
+import com.returney.flow.domain.execution.PipelineResult;
+import com.returney.flow.port.ExecutionListener;
+import com.returney.flow.port.LlmExecutor;
+import com.returney.flow.port.NodeOutputExtractor;
+import com.returney.flow.port.PipelineRunner;
+import com.returney.flow.port.PipelineRunnerFactory;
+import com.returney.flow.port.PromptRenderer;
+import com.returney.flow.port.ServerNodeExecutor;
+import com.returney.flow.util.LlmJsonExtractor;
+import java.util.ServiceLoader;${importBlock}
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Executor;
+
+/** Gradle 코드젠으로 생성됨 — 직접 수정 금지. */
+public class ${m.flowName}Runner {"""
+    }
+
+    private static String renderFieldsAndConstructorForRunner(FlowModel m) {
+        def actionsArg = m.llmActions.collect { '"' + it + '"' }.join(', ')
+        """\
+    private static final Gson GSON = new Gson();
+
+    private static final PipelineRunnerFactory FLOW_FACTORY =
+        ServiceLoader.load(PipelineRunnerFactory.class).findFirst().orElseThrow();
+
+    protected static final PipelineDefinition DEFINITION =
+        FLOW_FACTORY.loadDefinition("${m.yamlResourcePath}");
+
+    private static final PromptRenderer RENDERER =
+        FLOW_FACTORY.classpathRenderer(${actionsArg});
+
+    private final Executor executor;
+    private final LlmExecutor llmExecutor;
+
+    public ${m.flowName}Runner(
+        Executor executor,
+        LlmExecutor llmExecutor) {
+        this.executor = executor;
+        this.llmExecutor = llmExecutor;
+    }"""
+    }
+
+    private static String renderInternalsForRunner(FlowModel m) {
+        def hasServerNodes = !m.serverNodes.isEmpty()
+        def snParam = hasServerNodes ? "${m.flowName}ServerNodes serverNodes" : ""
+        def supportedIds = m.serverNodes.collect { '"' + it.id + '"' }.join(', ')
+        def scatterCases = switchOrThrow(
+            m.scatterNodes.collect { serverDispatchCaseWithPrefix(it, 'Scatter', 'inputs', 'serverNodes') }, 'scatter')
+        def gatherCases = switchOrThrow(
+            m.gatherNodes.collect { serverDispatchCaseWithPrefix(it, 'Gather', 'chunks', 'serverNodes') }, 'gather')
+        def transformCases = switchOrThrow(
+            m.transformNodes.collect { node ->
+                def methodName = node.methodName.replace('Transform', '') + 'Transform'
+                node.typed
+                    ? "                case \"${node.id}\" -> serverNodes.${methodName}(inputs).prompt();"
+                    : "                case \"${node.id}\" -> serverNodes.${methodName}(inputs);"
+            }, 'transform')
+        def transformTypedCases = switchOrThrow(
+            m.transformNodes.collect { node ->
+                def methodName = node.methodName.replace('Transform', '') + 'Transform'
+                node.typed
+                    ? "                case \"${node.id}\" -> serverNodes.${methodName}(inputs);"
+                    : "                case \"${node.id}\" -> com.returney.flow.domain.execution.NodeOutput.textOnly(serverNodes.${methodName}(inputs));"
+            }, 'transformTyped')
+
+        def fieldExtractorBody = renderFieldExtractorBody(m)
+
+        def parseBlocks = m.resultNodes.collect { node ->
+            def hookCall = node.hook
+                ? "\n        if (${node.field} != null) on${node.field.capitalize()}(${node.field});"
+                : ""
+            """\
+        ${node.javaType} ${node.field} = null;
+        if (!result.failedNodes().contains("${node.id}") && result.nodeResults().containsKey("${node.id}")) {
+            ${node.field} = ${node.parseExpr};
+        }${hookCall}"""
+        }.join('\n\n')
+
+        def returnStmt
+        if (m.singleResult) {
+            returnStmt = "        return ${m.resultNodes[0].field};"
+        } else {
+            def args = m.resultNodes.collect { it.field }.join(', ')
+            returnStmt = "        return new ${m.outputJavaType}(${args});"
+        }
+
+        """\
+    // ── internal ─────────────────────────────────────────────────────────────
+
+    private NodeOutputExtractor buildFieldExtractor() {
+        return new NodeOutputExtractor() {
+            @Override
+            public String extract(String nodeId, String fieldName, String output) {
+                ${fieldExtractorBody}
+            }
+        };
+    }
+
+    private ServerNodeExecutor buildServerNodeExecutor(${snParam}) {
+        return new ServerNodeExecutor() {
+            @Override
+            public boolean supports(String nodeId) {
+                return java.util.Set.of(${supportedIds}).contains(nodeId);
+            }
+            @Override
+            public List<String> scatter(String nodeId, Map<String, Object> inputs) {
+                ${scatterCases}
+            }
+            @Override
+            public String gather(String nodeId, List<String> chunks) {
+                ${gatherCases}
+            }
+            @Override
+            public String transform(String nodeId, Map<String, Object> inputs) {
+                ${transformCases}
+            }
+            @Override
+            public com.returney.flow.domain.execution.NodeOutput transformTyped(String nodeId, Map<String, Object> inputs) {
+                ${transformTypedCases}
+            }
+        };
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T extractTyped(
+            com.returney.flow.domain.execution.NodeResult node, Class<T> type) {
+        if (node != null && node.typedOutput() != null) return type.cast(node.typedOutput());
+        String raw = node != null ? node.output() : null;
+        return GSON.fromJson(LlmJsonExtractor.extract(raw), type);
+    }
+
+    private ${m.outputJavaType} parseResult(PipelineResult result) {
+${parseBlocks}
+
+${returnStmt}
+    }
+}
+"""
+    }
+
+    private static String serverDispatchCaseWithPrefix(FlowModel.ServerNode node, String suffix, String argName, String prefix) {
+        def methodName = node.methodName.replace(suffix, '') + suffix
+        """                case "${node.id}" -> ${prefix}.${methodName}(${argName});"""
     }
 }

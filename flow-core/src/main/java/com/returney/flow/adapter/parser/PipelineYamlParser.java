@@ -26,8 +26,15 @@ public class PipelineYamlParser {
   static class PipelineConfig {
     public String name;
     public int version;
-    public List<String> prerequisites;
+    /** String 또는 {name, type} Map 혼용 가능. 타입 정보는 코드젠이 사용; 런타임은 name만 추출. */
+    public List<Object> prerequisites;
     public List<NodeConfig> nodes;
+    /** 다중 결과 파이프라인의 도메인 출력 타입(FQCN). 코드젠이 사용; 런타임에선 무시. */
+    public OutputConfig output;
+  }
+
+  static class OutputConfig {
+    public String type;
   }
 
   static class NodeConfig {
@@ -66,7 +73,9 @@ public class PipelineYamlParser {
     if (config == null) throw new PipelineParseException("YAML content is empty");
     if (config.name == null) throw new PipelineParseException("Missing required field: name");
 
-    List<String> prerequisites = config.prerequisites != null ? config.prerequisites : List.of();
+    List<String> prerequisites = config.prerequisites != null
+        ? config.prerequisites.stream().map(this::extractPrereqName).collect(Collectors.toList())
+        : List.of();
     List<NodeConfig> rawNodes = config.nodes != null ? config.nodes : List.of();
 
     List<PipelineNode> nodes = rawNodes.stream().map(this::parseNode).collect(Collectors.toList());
@@ -97,10 +106,18 @@ public class PipelineYamlParser {
   }
 
   private String parseResultType(ResultConfig result, String nodeId) {
-    if (result != null && result.type != null) {
-      return resolveTypeName(result.type);
-    }
-    throw new PipelineParseException("Missing required result.type for node: " + nodeId);
+    // result.type 미선언 → 코드젠이 이 노드를 결과 record에 포함하지 않음 (중간 노드 케이스).
+    // 이전엔 강제였지만 다중 결과 파이프라인 단순화 + scatter/gather 중간 노드 정리를 위해 optional로 완화.
+    if (result == null || result.type == null) return null;
+    return resolveTypeName(result.type);
+  }
+
+  /** prerequisites 항목에서 이름을 추출한다. String → 그대로, Map → name 필드. */
+  @SuppressWarnings("unchecked")
+  private String extractPrereqName(Object item) {
+    if (item instanceof String s) return s;
+    if (item instanceof Map<?, ?> m) return (String) m.get("name");
+    throw new PipelineParseException("Unexpected prerequisite format: " + item);
   }
 
   /** String, Integer 등 shorthand를 FQCN으로 확장한다. */

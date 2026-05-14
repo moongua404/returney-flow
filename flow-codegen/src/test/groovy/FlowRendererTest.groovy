@@ -7,134 +7,193 @@ class FlowRendererTest {
 
     private static FlowModel buildModel(String yamlBody) {
         def pipeline = new Yaml().load(yamlBody) as Map
-        FlowModel.from(pipeline, 'com.example.generated')
+        FlowModel.from(pipeline, 'com.example.generated.pipeline')
     }
 
-    // ── prerequisites() ─────────────────────────────────────────────────────
+    // ── pipelineBase: 단일 결과 케이스 ──────────────────────────────────────
 
     @Test
-    void prerequisites_record_has_all_fields() {
-        def model = buildModel("""
-            name: test
-            prerequisites: [sessionId, reportText, userId]
-            nodes: []
-        """)
-
-        def output = FlowRenderer.prerequisites(model)
-
-        assertThat(output).contains("package com.example.generated;")
-        assertThat(output).contains("public record TestPrerequisites(")
-        assertThat(output).contains("String sessionId")
-        assertThat(output).contains("String reportText")
-        assertThat(output).contains("String userId")
-        assertThat(output).contains("public static TestPrerequisites from(Map<String, String> map)")
-        assertThat(output).contains("public Map<String, String> toMap()")
-    }
-
-    // ── resultRecord() ──────────────────────────────────────────────────────
-
-    @Test
-    void result_record_has_typed_fields_and_imports() {
-        def model = buildModel("""
-            name: test
-            nodes:
-              - id: analyze
-                type: llm
-                result: { type: com.example.AnalysisResult }
-              - id: count
-                type: llm
-                result: { type: Integer }
-        """)
-
-        def output = FlowRenderer.resultRecord(model)
-
-        assertThat(output).contains("public record TestResult(")
-        assertThat(output).contains("AnalysisResult analyze")
-        assertThat(output).contains("Integer count")
-        assertThat(output).contains("import com.example.AnalysisResult;")
-        // builtin Integer는 import 없음
-        assertThat(output).doesNotContain("import java.lang.Integer")
-    }
-
-    // ── fieldExtractor() ────────────────────────────────────────────────────
-
-    @Test
-    void field_extractor_with_no_refs_throws_for_any_input() {
-        def model = buildModel("""
-            name: test
-            nodes:
-              - id: a
-                type: llm
-        """)
-
-        def output = FlowRenderer.fieldExtractor(model)
-
-        assertThat(output).contains("class TestFieldExtractor implements NodeOutputExtractor")
-        assertThat(output).contains("throw new IllegalArgumentException")
-        assertThat(output).contains("Unknown field reference")
-    }
-
-    @Test
-    void field_extractor_with_refs_emits_switch_cases() {
-        def model = buildModel("""
-            name: test
-            nodes:
-              - id: analyze
-                type: llm
-                result: { type: com.example.AnalysisResult }
-              - id: consumer
-                type: llm
-                inputs:
-                  text: analyze.someField
-                  other: analyze.anotherField
-        """)
-
-        def output = FlowRenderer.fieldExtractor(model)
-
-        assertThat(output).contains("case \"analyze.someField\"")
-        assertThat(output).contains("case \"analyze.anotherField\"")
-        assertThat(output).contains("GSON.fromJson(output, AnalysisResult.class)")
-        assertThat(output).contains("import com.google.gson.Gson;")
-    }
-
-    // ── llmMiddleware() ─────────────────────────────────────────────────────
-
-    @Test
-    void llm_middleware_implements_LlmExecutor_with_decorator() {
+    void pipeline_base_single_result_returns_node_type_directly() {
         def model = buildModel("""
             name: my-flow
-            nodes: []
-        """)
-
-        def output = FlowRenderer.llmMiddleware(model)
-
-        assertThat(output).contains("class MyFlowLlmMiddleware implements LlmExecutor")
-        assertThat(output).contains("private final LlmExecutor delegate;")
-        assertThat(output).contains("public LlmRawResponse execute(LlmRequest request)")
-        assertThat(output).contains("protected LlmRequest beforeExecute(LlmRequest request)")
-        assertThat(output).contains("public void setSessionId(UUID sessionId)")
-    }
-
-    // ── pipelineBase() — sub-renderer 통합 ─────────────────────────────────
-
-    @Test
-    void pipeline_base_has_class_skeleton() {
-        def model = buildModel("""
-            name: my-flow
-            prerequisites: [x]
+            prerequisites:
+              - name: x
+                type: java.lang.String
             nodes:
-              - id: a
+              - id: analyze
                 type: llm
                 action: analyze
+                result: { type: String }
         """)
 
         def output = FlowRenderer.pipelineBase(model)
 
         assertThat(output).contains("public abstract class MyFlowBase {")
-        assertThat(output).contains("protected MyFlowBase(Executor executor)")
-        // 클래스 본체 종료
-        assertThat(output).endsWith("}\n")
+        // typed run — yaml prereqs가 메서드 파라미터로 펼쳐짐
+        assertThat(output).contains("public final String run(")
+        assertThat(output).contains("UUID sessionId,")
+        assertThat(output).contains("String x")
+        // 단일 결과 → wrapper 없이 바로 리턴
+        assertThat(output).contains("return analyze;")
+        assertThat(output).doesNotContain("new MyFlowResult(")
     }
+
+    @Test
+    void typed_run_scatters_prereqs_into_method_params() {
+        def model = buildModel("""
+            name: scattered
+            prerequisites:
+              - name: foo
+                type: java.lang.String
+              - name: bar
+                type: java.lang.String
+              - name: baz
+                type: java.lang.String
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+        """)
+        def output = FlowRenderer.pipelineBase(model)
+
+        // 각 prereq가 String 파라미터로
+        assertThat(output).contains("String foo")
+        assertThat(output).contains("String bar")
+        assertThat(output).contains("String baz")
+        // 내부에서 Map.ofEntries로 빌드
+        assertThat(output).contains("Map.ofEntries(")
+        assertThat(output).contains('"foo", (Object) foo')
+        assertThat(output).contains('"bar", (Object) bar')
+        assertThat(output).contains('"baz", (Object) baz')
+    }
+
+    @Test
+    void typed_run_no_prereqs_emits_session_only_signature() {
+        def model = buildModel("""
+            name: empty-prereq
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+        """)
+        def output = FlowRenderer.pipelineBase(model)
+        assertThat(output).contains("public final String run(UUID sessionId)")
+    }
+
+    @Test
+    void pipeline_base_runInternal_only_no_listener() {
+        // runWithOptions/listener escape hatch 통째 폐기 — Map 직접 호출은 protected runInternal로만,
+        // ExecutionListener는 노출 안 함 (조건부 실행은 yaml CONDITIONAL이, 진행률은 호출자 phase 갱신으로).
+        def model = buildModel("""
+            name: t
+            prerequisites:
+              - name: x
+                type: java.lang.String
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+        """)
+        def output = FlowRenderer.pipelineBase(model)
+        assertThat(output).contains("public final String runInternal(")
+        // listener/nodeIds/ExecutionConfig 모두 시그니처에서 사라짐
+        assertThat(output).doesNotContain("runWithOptions")
+        assertThat(output).doesNotContain("Set<String> nodeIds")
+        assertThat(output).doesNotContain("ExecutionConfig config,")
+        assertThat(output).doesNotContain("ExecutionListener listener")
+    }
+
+    @Test
+    void pipeline_base_single_result_critical_check_uses_result_null() {
+        def model = buildModel("""
+            name: t
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                critical: true
+                result: { type: String }
+        """)
+
+        def output = FlowRenderer.pipelineBase(model)
+        assertThat(output).contains("public final boolean isCriticalFailure(String result)")
+        assertThat(output).contains("return result == null;")
+    }
+
+    // ── pipelineBase: 다중 결과 케이스 (output.type 명시) ──────────────────
+
+    @Test
+    void pipeline_base_multi_result_uses_declared_output_type_constructor() {
+        def model = buildModel("""
+            name: multi
+            output:
+              type: com.example.MultiOutcome
+            nodes:
+              - id: foo
+                type: llm
+                action: foo
+                result: { type: String }
+              - id: bar
+                type: llm
+                action: bar
+                result: { type: Integer }
+        """)
+
+        def output = FlowRenderer.pipelineBase(model)
+
+        assertThat(output).contains("public final MultiOutcome run(")
+        assertThat(output).contains("return new MultiOutcome(foo, bar);")
+        assertThat(output).contains("import com.example.MultiOutcome;")
+    }
+
+    @Test
+    void pipeline_base_multi_result_critical_check_uses_accessors() {
+        def model = buildModel("""
+            name: multi
+            output:
+              type: com.example.MultiOutcome
+            nodes:
+              - id: c1
+                type: llm
+                action: c1
+                critical: true
+                result: { type: String }
+              - id: c2
+                type: llm
+                action: c2
+                critical: false
+                result: { type: String }
+        """)
+
+        def output = FlowRenderer.pipelineBase(model)
+
+        assertThat(output).contains("if (result.c1() == null) return true;")
+        assertThat(output).doesNotContain("if (result.c2() == null) return true;")
+    }
+
+    @Test
+    void multi_result_without_output_type_falls_back_to_void() {
+        // FlowModel 단계는 lenient — output.type 미선언이면 Void로 폴백.
+        // 실제 production yaml은 단일 결과 OR output.type 명시 둘 중 하나로 검증된 상태.
+        def model = buildModel("""
+            name: bad
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+              - id: b
+                type: llm
+                action: b
+                result: { type: String }
+        """)
+        assertThat(model.outputJavaType).isEqualTo("Void")
+    }
+
+    // ── pipelineBase 공통 ─────────────────────────────────────────────────
 
     @Test
     void pipeline_base_loads_only_llm_actions_into_renderer() {
@@ -144,6 +203,7 @@ class FlowRendererTest {
               - id: a
                 type: llm
                 action: foo
+                result: { type: String }
               - id: b
                 type: scatter
               - id: c
@@ -152,21 +212,45 @@ class FlowRendererTest {
         """)
 
         def output = FlowRenderer.pipelineBase(model)
-
-        // foo, bar만 ClasspathPromptRenderer에 등록 (scatter는 제외)
-        assertThat(output).contains("ClasspathPromptRenderer.forActions(\"foo\", \"bar\")")
+        // foo, bar만 등록 (scatter는 제외)
+        assertThat(output).contains("FLOW_FACTORY.classpathRenderer(\"foo\", \"bar\")")
     }
 
     @Test
-    void pipeline_base_emits_extension_point_methods() {
-        def model = buildModel("name: t\nnodes: []")
+    void pipeline_base_no_extension_hooks_emitted() {
+        // YAGNI: 4개 hook (apiKeySupplier/rateLimiter/createLlmExecutor/createLlmMiddleware) 제거됨.
+        // RateLimiter/ApiKeySupplier는 flow-core 내부 디테일이고, LlmExecutor는 생성자 주입.
+        def model = buildModel("""
+            name: t
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+        """)
         def output = FlowRenderer.pipelineBase(model)
 
-        // 4개 오버라이더블
-        assertThat(output).contains("protected ApiKeySupplier apiKeySupplier()")
-        assertThat(output).contains("protected RateLimiter rateLimiter()")
-        assertThat(output).contains("protected LlmExecutor createLlmExecutor()")
-        assertThat(output).contains("protected LlmExecutor createLlmMiddleware(LlmExecutor base)")
+        assertThat(output).doesNotContain("apiKeySupplier")
+        assertThat(output).doesNotContain("rateLimiter")
+        assertThat(output).doesNotContain("createLlmExecutor")
+        assertThat(output).doesNotContain("createLlmMiddleware")
+        assertThat(output).doesNotContain("cachedLlmExecutor")
+    }
+
+    @Test
+    void pipeline_base_constructor_takes_executor_and_llmExecutor() {
+        def model = buildModel("""
+            name: t
+            nodes:
+              - id: a
+                type: llm
+                action: a
+                result: { type: String }
+        """)
+        def output = FlowRenderer.pipelineBase(model)
+
+        assertThat(output).contains("protected TBase(Executor executor, LlmExecutor llmExecutor)")
+        assertThat(output).contains("private final LlmExecutor llmExecutor;")
     }
 
     @Test
@@ -178,6 +262,7 @@ class FlowRendererTest {
                 type: scatter
               - id: chunk_merger
                 type: gather
+                result: { type: String }
               - id: codebase_summary
                 type: transform
         """)
@@ -189,87 +274,59 @@ class FlowRendererTest {
         assertThat(output).contains("protected abstract String codebaseSummaryTransform")
     }
 
+    // ── FieldExtractor inline ─────────────────────────────────────────────
+
     @Test
-    void pipeline_base_emits_hook_methods_only_for_hook_nodes() {
+    void field_extractor_inline_with_no_refs_throws() {
         def model = buildModel("""
             name: test
             nodes:
               - id: a
                 type: llm
-                hook: true
-                result: { type: String }
-              - id: b
-                type: llm
-                hook: false
+                action: a
                 result: { type: String }
         """)
 
         def output = FlowRenderer.pipelineBase(model)
-
-        assertThat(output).contains("protected void onA(")
-        assertThat(output).doesNotContain("protected void onB(")
+        // anonymous NodeOutputExtractor 안에 throw 본문
+        assertThat(output).contains("private NodeOutputExtractor buildFieldExtractor()")
+        assertThat(output).contains("Unknown field reference: ")
     }
 
     @Test
-    void pipeline_base_isCriticalFailure_checks_critical_nodes_only() {
+    void field_extractor_inline_with_refs_emits_switch() {
         def model = buildModel("""
             name: test
+            output:
+              type: com.example.Outcome
             nodes:
-              - id: c1
+              - id: analyze
                 type: llm
-                critical: true
-                result: { type: String }
-              - id: c2
+                action: analyze
+                result: { type: com.example.AnalysisResult }
+              - id: consumer
                 type: llm
-                critical: false
+                action: consumer
                 result: { type: String }
+                inputs:
+                  text: analyze.someField
         """)
 
         def output = FlowRenderer.pipelineBase(model)
-
-        // critical=true인 c1만 isCriticalFailure 검사 대상
-        assertThat(output).contains("if (result.c1() == null) return true;")
-        assertThat(output).doesNotContain("if (result.c2() == null) return true;")
+        assertThat(output).contains("case \"analyze.someField\" ->")
+        assertThat(output).contains("GSON.fromJson(LlmJsonExtractor.extract(output), AnalysisResult.class)")
     }
 
-    @Test
-    void pipeline_base_no_critical_nodes_isCriticalFailure_always_false() {
-        def model = buildModel("""
-            name: test
-            nodes:
-              - id: a
-                type: llm
-                result: { type: String }
-        """)
-
-        def output = FlowRenderer.pipelineBase(model)
-
-        assertThat(output).contains("public final boolean isCriticalFailure(TestResult result)")
-        // critical 없으니 false만 반환
-        assertThat(output).contains("return false;")
-    }
+    // ── FlowInterfaceGenerator e2e ────────────────────────────────────────
 
     @Test
-    void pipeline_base_imports_cover_extension_dependencies() {
-        def model = buildModel("name: t\nnodes: []")
-        def output = FlowRenderer.pipelineBase(model)
-
-        // retry/rate limit/router/codegen이 정상 import되는지
-        assertThat(output).contains("import com.returney.flow.application.InternalLlmRouter;")
-        assertThat(output).contains("import com.returney.flow.adapter.common.SlidingWindowRateLimiter;")
-        assertThat(output).contains("import com.returney.flow.adapter.parser.ProvidersConfig;")
-        assertThat(output).contains("import com.returney.flow.adapter.parser.ProvidersYamlParser;")
-        assertThat(output).contains("import com.returney.flow.port.RateLimiter;")
-        assertThat(output).contains("import com.returney.flow.port.ApiKeySupplier;")
-    }
-
-    // ── FlowInterfaceGenerator e2e ──────────────────────────────────────────
-
-    @Test
-    void interface_generator_writes_5_artifacts_to_disk(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) {
+    void interface_generator_writes_only_base_to_pipeline_subpackage(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) {
         def yaml = """
             name: my-flow
-            prerequisites: [x]
+            prerequisites:
+              - name: x
+                type: java.lang.String
             nodes:
               - id: analyze
                 type: llm
@@ -283,17 +340,20 @@ class FlowRendererTest {
 
         FlowInterfaceGenerator.generate(yamlFile.toFile(), outDir.toFile(), 'com.example.gen')
 
-        java.nio.file.Path pkgDir = outDir.resolve("com/example/gen")
-        assertThat(pkgDir.resolve("MyFlowPrerequisites.java")).exists()
-        assertThat(pkgDir.resolve("MyFlowResult.java")).exists()
-        assertThat(pkgDir.resolve("MyFlowFieldExtractor.java")).exists()
-        assertThat(pkgDir.resolve("MyFlowLlmMiddleware.java")).exists()
-        assertThat(pkgDir.resolve("MyFlowBase.java")).exists()
+        // pipeline subpackage에 Runner + Input만 생성됨 (구 Base/Prerequisites/Result/FieldExtractor/LlmMiddleware 제거됨)
+        java.nio.file.Path pkgDir = outDir.resolve("com/example/gen/pipeline")
+        assertThat(pkgDir.resolve("MyFlowRunner.java")).exists()
+        assertThat(pkgDir.resolve("MyFlowInput.java")).exists()
+        assertThat(pkgDir.resolve("MyFlowBase.java")).doesNotExist()
+        assertThat(pkgDir.resolve("MyFlowPrerequisites.java")).doesNotExist()
+        assertThat(pkgDir.resolve("MyFlowResult.java")).doesNotExist()
+        assertThat(pkgDir.resolve("MyFlowFieldExtractor.java")).doesNotExist()
+        assertThat(pkgDir.resolve("MyFlowLlmMiddleware.java")).doesNotExist()
     }
 
     @Test
-    void interface_generator_runs_validation_on_input(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) {
-        // 사이클 있는 yaml — validateAll에서 strict 실패
+    void interface_generator_runs_validation_on_input(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) {
         def yaml = """
             nodes:
               - id: a

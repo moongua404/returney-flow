@@ -2,22 +2,40 @@ class FlowModel {
 
     final String flowName
     final String pkg
-    final String yamlResourcePath  // 클래스패스 yaml 파일명 (예: "chat-flow.yaml")
-    final List<String> prerequisites
+    final String yamlResourcePath
+    final List<Prerequisite> prerequisites
     final List<ResultNode> resultNodes
     final List<ServerNode> serverNodes
     final List<ServerNode> scatterNodes
     final List<ServerNode> gatherNodes
     final List<ServerNode> transformNodes
     final List<FieldRef> fieldRefs
-    final List<String> llmActions  // actions from llm/template nodes (for ClasspathPromptRenderer)
+    final List<String> llmActions
+
+    /**
+     * run() 반환 타입의 FQCN. 결정 규칙:
+     * <ul>
+     *   <li>yaml top-level {@code output.type:} 가 있으면 그 FQCN — 도메인 record를 호출자가
+     *       손으로 정의한 경우 (예: 다중 결과 AnalysisOutcome)</li>
+     *   <li>없고 result-bearing 노드가 정확히 1개면 그 노드의 result.type — 단일 결과 케이스</li>
+     *   <li>그 외엔 검증 실패 (FlowValidator에서 잡음)</li>
+     * </ul>
+     */
+    final String outputFqcn
+    final String outputJavaType    // simple type for generated code
+    final String outputImportLine  // "import Foo;" or null for builtin/same-package
+    final boolean outputBuiltin    // true면 단일 result, primitive/String 등
+    final boolean singleResult     // result-bearing 노드 1개 케이스 (래핑 안 하고 직접 반환)
 
     private FlowModel(String flowName, String pkg, String yamlResourcePath,
                       List<String> prerequisites,
                       List<ResultNode> resultNodes,
                       List<ServerNode> serverNodes,
                       List<FieldRef> fieldRefs,
-                      List<String> llmActions) {
+                      List<String> llmActions,
+                      String outputFqcn, String outputJavaType,
+                      String outputImportLine, boolean outputBuiltin,
+                      boolean singleResult) {
         this.flowName          = flowName
         this.pkg               = pkg
         this.yamlResourcePath  = yamlResourcePath
@@ -29,9 +47,13 @@ class FlowModel {
         this.transformNodes    = serverNodes.findAll { it.type == 'transform' }
         this.fieldRefs         = fieldRefs
         this.llmActions        = llmActions
+        this.outputFqcn        = outputFqcn
+        this.outputJavaType    = outputJavaType
+        this.outputImportLine  = outputImportLine
+        this.outputBuiltin     = outputBuiltin
+        this.singleResult      = singleResult
     }
 
-    /** 단일 yaml 모델 (yamlResourcePath 미지정 시 'pipeline-flow.yaml' 호환 경로 사용). */
     static FlowModel from(Map pipeline, String pkg) {
         return from(pipeline, pkg, 'pipeline-flow.yaml')
     }
@@ -39,16 +61,17 @@ class FlowModel {
     static FlowModel from(Map pipeline, String pkg, String yamlResourcePath) {
         def flowName = toCamelCase(pipeline.name as String)
         def allNodes = pipeline.nodes as List<Map>
-        def prereqs  = (pipeline.prerequisites as List<String>) ?: []
+        def prereqs  = buildPrerequisites(pipeline.prerequisites as List)
 
         def resultNodes = allNodes
             .findAll { it?.result?.type != null }
             .collect { buildResultNode(it) }
 
         def serverTypes = ['scatter', 'gather', 'transform'] as Set
+        def resultNodesById = resultNodes.collectEntries { [(it.id): it] }
         def serverNodes = allNodes
             .findAll { serverTypes.contains((it.type as String)?.toLowerCase()) }
-            .collect { buildServerNode(it) }
+            .collect { buildServerNode(it, resultNodesById) }
 
         def fieldRefs = buildFieldRefs(allNodes)
 
@@ -58,11 +81,40 @@ class FlowModel {
             .collect { ((it.action ?: it.id) as String) }
             .unique()
 
+        // ── output type 해석 ─────────────────────────────────────────────────
+        // 모델 단계에선 lenient — 결정만 하고 throw 안 함 (FlowValidator/Renderer에서 강제).
+        // - yaml output.type 있으면 그걸로 (다중 결과 케이스, 호출자가 도메인 record 직접 정의)
+        // - 없고 단일 result-bearing 노드면 그 노드의 result.type
+        // - 그 외 (0개 또는 2+개인데 output.type 미선언)는 java.lang.Void 폴백
+        String outputFqcn
+        boolean singleResult
+        Map outputCfg = pipeline.output as Map
+        if (outputCfg?.type != null) {
+            outputFqcn = resolveType(outputCfg.type as String)
+            singleResult = false
+        } else if (resultNodes.size() == 1) {
+            outputFqcn = resultNodes[0].fqcn
+            singleResult = true
+        } else {
+            outputFqcn = 'java.lang.Void'
+            singleResult = false
+        }
+
+        boolean outputBuiltin = isBuiltinType(outputFqcn)
+        String outputJavaType = outputBuiltin ? simpleBuiltin(outputFqcn) : simpleType(outputFqcn)
+        String outputImportLine = outputBuiltin ? null : "import ${outerImport(outputFqcn)};"
+
         new FlowModel(flowName, pkg, yamlResourcePath,
-            prereqs, resultNodes, serverNodes, fieldRefs, llmActions)
+            prereqs, resultNodes, serverNodes, fieldRefs, llmActions,
+            outputFqcn, outputJavaType, outputImportLine, outputBuiltin, singleResult)
     }
 
     // ── inner model classes ───────────────────────────────────────────────────
+
+    static class Prerequisite {
+        String name
+        String fqcn   // "java.util.UUID", "boolean", "java.lang.String" 등
+    }
 
     static class ResultNode {
         String id
@@ -81,6 +133,8 @@ class FlowModel {
         String type           // "scatter" | "gather" | "transform"
         String methodName     // camelField(id) + type.capitalize()
         String methodSignature // full interface method declaration line
+        boolean typed         // transform 노드가 result.type 도 갖고 있으면 true — NodeOutput 리턴
+        String typedJavaType  // typed 일 때 도메인 객체 타입 (사용처 안내용)
     }
 
     static class FieldRef {
@@ -92,6 +146,27 @@ class FlowModel {
     }
 
     // ── builders ─────────────────────────────────────────────────────────────
+
+    private static List<Prerequisite> buildPrerequisites(List items) {
+        if (!items) return []
+        items.collect { item ->
+            if (item instanceof String) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] Prerequisite '${item}' must declare explicit type. " +
+                    "Use '- name: ${item}\n  type: java.lang.String' instead of '- ${item}'")
+            }
+            def m = item as Map
+            def name = m.name as String
+            if (!m.type) {
+                throw new IllegalArgumentException(
+                    "[FlowCodegen] Prerequisite '${name}' is missing required 'type:' field.")
+            }
+            def p = new Prerequisite()
+            p.name = name
+            p.fqcn = resolveType(m.type as String)
+            p
+        }
+    }
 
     private static ResultNode buildResultNode(Map node) {
         def fqcn    = resolveType(node.result.type as String)
@@ -105,18 +180,24 @@ class FlowModel {
         n.builtin    = builtin
         n.critical   = node.critical as boolean
         n.hook       = node.hook as boolean
-        def rawAccess = "result.nodeResults().get(\"${n.id}\").output()"
+        def rawNodeAccess = "result.nodeResults().get(\"${n.id}\")"
+        def rawAccess = "${rawNodeAccess}.output()"
+        // typedOutput 우선 사용 — 프레임워크가 이미 역직렬화했으면 그대로 캐스트.
+        // 없으면 Gson 폴백 (LlmJsonExtractor로 코드펜스 제거 후 파싱).
         n.parseExpr  = builtin
             ? castBuiltin(fqcn, rawAccess)
-            : "GSON.fromJson(${rawAccess}, ${n.javaType}.class)"
+            : "extractTyped(${rawNodeAccess}, ${n.javaType}.class)"
         n
     }
 
-    private static ServerNode buildServerNode(Map node) {
+    private static ServerNode buildServerNode(Map node, Map<String, ResultNode> resultNodesById) {
         def n = new ServerNode()
         n.id         = node.id as String
         n.type       = (node.type as String).toLowerCase()
         n.methodName = camelField(n.id) + n.type.capitalize()
+        def matchingResult = resultNodesById[n.id]
+        n.typed = (n.type == 'transform' && matchingResult != null && !matchingResult.builtin)
+        n.typedJavaType = n.typed ? matchingResult.javaType : null
         n.methodSignature =
             n.type == 'scatter'   ? "    java.util.List<String> ${n.methodName}(java.util.Map<String, String> inputs);"
           : n.type == 'gather'    ? "    String ${n.methodName}(java.util.List<String> chunks);"

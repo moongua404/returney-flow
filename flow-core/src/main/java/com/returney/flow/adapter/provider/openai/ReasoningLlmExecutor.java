@@ -10,7 +10,6 @@ import com.returney.flow.domain.llm.LlmRequest;
 import java.net.http.HttpClient;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * OpenAI Reasoning 모델 LlmExecutor 구현체.
@@ -47,15 +46,12 @@ public class ReasoningLlmExecutor implements LlmExecutor {
 
   @Override
   public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
+    // reasoning 모델은 system 메시지 미지원 → system + user를 하나의 user 메시지로 병합.
     String prompt;
-    if (request.isConversation()) {
-      // reasoning 모델은 system 미지원 — system + messages를 user 메시지로 병합
-      prompt = request.systemPrompt() + "\n\n"
-          + request.messages().stream()
-              .map(m -> "[" + m.role() + "] " + m.content())
-              .collect(Collectors.joining("\n"));
+    if (request.systemPrompt() != null && !request.systemPrompt().isBlank()) {
+      prompt = request.systemPrompt() + "\n\n" + request.prompt();
     } else {
-      prompt = request.singlePrompt();
+      prompt = request.prompt();
     }
     return callApi(buildBody(prompt, request.model()), request.model());
   }

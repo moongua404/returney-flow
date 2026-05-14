@@ -102,7 +102,8 @@ class PipelineYamlParserTest {
   }
 
   @Test
-  void result_type_누락_시_예외() {
+  void result_type_누락_시_resultType_null() {
+    // 중간 노드(fan-out scatter/gather 페어 등)는 result.type 생략 가능 — null로 파싱.
     String noResultYaml =
         """
         name: no-result
@@ -113,9 +114,8 @@ class PipelineYamlParserTest {
             type: llm
         """;
 
-    assertThatThrownBy(() -> parser.parse(noResultYaml))
-        .isInstanceOf(PipelineParseException.class)
-        .hasMessageContaining("result.type");
+    PipelineDefinition def = parser.parse(noResultYaml);
+    assertThat(def.nodes().get(0).resultType()).isNull();
   }
 
   @Test

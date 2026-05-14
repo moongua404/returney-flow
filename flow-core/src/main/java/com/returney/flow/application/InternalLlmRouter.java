@@ -236,11 +236,8 @@ public final class InternalLlmRouter implements LlmExecutor {
    */
   private static int estimateTokens(LlmRequest request) {
     int chars = 0;
-    if (request.singlePrompt() != null) chars += request.singlePrompt().length();
+    if (request.prompt() != null) chars += request.prompt().length();
     if (request.systemPrompt() != null) chars += request.systemPrompt().length();
-    if (request.messages() != null) {
-      for (LlmRequest.Message m : request.messages()) chars += m.content().length();
-    }
     return Math.max(1, chars / 4);
   }
 
@@ -310,10 +307,9 @@ public final class InternalLlmRouter implements LlmExecutor {
     return new LlmRequest(
         request.model(),
         adjusted,
-        request.singlePrompt(),
         request.systemPrompt(),
-        request.messages(),
-        request.cache(),
+        request.prompt(),
+        request.cacheEnabled(),
         request.binaryContent(),
         request.mimeType());
   }
@@ -333,10 +329,9 @@ public final class InternalLlmRouter implements LlmExecutor {
     return new LlmRequest(
         resolved,
         request.thinkingBudget(),
-        request.singlePrompt(),
         request.systemPrompt(),
-        request.messages(),
-        request.cache(),
+        request.prompt(),
+        request.cacheEnabled(),
         request.binaryContent(),
         request.mimeType());
   }

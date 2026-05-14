@@ -43,7 +43,7 @@ public class PipelineExecutor implements PipelineRunner {
   public CompletableFuture<PipelineResult> run(
       PipelineDefinition pipelineDef, String sessionId, Set<String> targetNodeIds,
       ExecutionConfig config, Map<String, NodeResult> seedResults,
-      Map<String, String> prerequisites) {
+      Map<String, Object> prerequisites) {
 
     ExecutionContext ctx = new ExecutionContext(sessionId, seedResults, prerequisites);
     for (String nodeId : targetNodeIds) {

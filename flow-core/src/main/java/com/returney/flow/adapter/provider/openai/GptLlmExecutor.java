@@ -46,15 +46,7 @@ public class GptLlmExecutor implements LlmExecutor {
 
   @Override
   public LlmRawResponse execute(LlmRequest request, LlmCallContext ctx) {
-    return callApi(buildBody(request.singlePrompt(), request.model(), null, null), request.model());
-  }
-
-  /**
-   * responseSchema가 있으면 Structured Outputs(json_schema)로 요청한다.
-   */
-  public LlmRawResponse executeWithSchema(
-      String renderedPrompt, String model, String action, Map<String, Object> responseSchema) {
-    return callApi(buildBody(renderedPrompt, model, responseSchema, action), model);
+    return callApi(buildBody(request), request.model());
   }
 
   private LlmRawResponse callApi(String body, String model) {
@@ -64,11 +56,17 @@ public class GptLlmExecutor implements LlmExecutor {
     return parseResponse(responseBody);
   }
 
-  private String buildBody(String prompt, String model, Map<String, Object> responseSchema, String action) {
-    ResponseFormat format = (responseSchema != null && action != null)
-        ? new ResponseFormat("json_schema", new JsonSchemaWrapper(action + "_response", true, responseSchema))
-        : new ResponseFormat("json_object", null);
-    return GSON.toJson(new Req(model, MAX_TOKENS, List.of(new Msg("user", prompt)), format));
+  /**
+   * system + user 메시지로 단일 호출. response_format: json_object 강제.
+   */
+  private String buildBody(LlmRequest request) {
+    List<Msg> messages = new java.util.ArrayList<>(2);
+    if (request.systemPrompt() != null && !request.systemPrompt().isBlank()) {
+      messages.add(new Msg("system", request.systemPrompt()));
+    }
+    messages.add(new Msg("user", request.prompt()));
+    return GSON.toJson(new Req(
+        request.model(), MAX_TOKENS, messages, new ResponseFormat("json_object", null)));
   }
 
   private LlmRawResponse parseResponse(String rawResponse) {
@@ -90,10 +88,7 @@ public class GptLlmExecutor implements LlmExecutor {
 
   private record Msg(String role, String content) {}
 
-  private record ResponseFormat(String type,
-      @SerializedName("json_schema") JsonSchemaWrapper jsonSchema) {}
-
-  private record JsonSchemaWrapper(String name, boolean strict, Object schema) {}
+  private record ResponseFormat(String type, @SerializedName("json_schema") Object jsonSchema) {}
 
   // ── Response DTOs ─────────────────────────────────────────────────────────
 
